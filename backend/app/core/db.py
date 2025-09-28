@@ -197,7 +197,7 @@ class Database:
             print(f"Error updating user in MongoDB: {e}")
             return False
     
-    async def get_active_jobs(self, limit: int = 1000, 
+    async def get_active_jobs(self, limit: int = 100, 
                             keywords: str = "software engineer", 
                             location: str = "India",
                             job_type_filter: str = None, 
