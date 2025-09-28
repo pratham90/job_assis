@@ -19,10 +19,11 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 // Configuration - Use environment variable for API base URL
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL ;
+const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || "https://fastapiserver-pja0.onrender.com";
 
 // Helper functions
 const isUsingLocalhost = (): boolean => {
+  if (!API_BASE_URL) return false;
   return API_BASE_URL.includes('127.0.0.1') || API_BASE_URL.includes('localhost');
 };
 
@@ -101,7 +102,7 @@ const SeekerProfile: React.FC = () => {
   const router = useRouter();
 
   // User metadata
-  const userRole = user?.unsafeMetadata?.role || "JOB_SEEKER";
+  const userRole = user?.unsafeMetadata?.role || "job_seeker";
   const isNew = user?.unsafeMetadata?.new;
 
   // State management
@@ -299,7 +300,7 @@ const SeekerProfile: React.FC = () => {
         }))
       };
 
-      // Updated to use the correct backend endpoint
+      // Use the correct backend endpoint with clerk_id as path parameter
       const response = await axios.patch(
         `${API_BASE_URL}/api/users/${userId}`,
         updatedProfile,
@@ -322,7 +323,7 @@ const SeekerProfile: React.FC = () => {
     }
   };
 
-  // File upload functions - SIMPLIFIED to work with backend
+  // File upload functions - FIXED
   const pickDocument = async (): Promise<void> => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
@@ -367,27 +368,32 @@ const SeekerProfile: React.FC = () => {
     try {
       const formData = new FormData();
       formData.append("clerk_id", clerkId);
-      formData.append("user_role", "job_seeker"); // FIX: Use actual userRole
+      formData.append("user_role", String(userRole || "job_seeker"));
 
-      // For React Native, we need to append the file differently
+      // For React Native, append the file correctly
       formData.append("file", {
         uri: selectedFile.uri,
         type: selectedFile.mimeType || "application/pdf",
         name: selectedFile.name,
       } as any);
 
+      // Use correct endpoint URL
       const uploadUrl = `${API_BASE_URL}/api/users/upload`;
+      console.log("Uploading to:", uploadUrl);
 
       const response = await fetch(uploadUrl, {
         method: "POST",
         body: formData,
         headers: {
-          // Don't set Content-Type - let browser handle it
+          // Don't set Content-Type - let browser/RN handle it for multipart
         },
       });
 
+      console.log("Upload response status:", response.status);
+
       if (!response.ok) {
         const errorText = await response.text();
+        console.error("Upload error response:", errorText);
         let errorData;
         try {
           errorData = JSON.parse(errorText);
@@ -398,25 +404,26 @@ const SeekerProfile: React.FC = () => {
       }
 
       const data = await response.json();
+      console.log("Upload successful:", data);
 
       // Validate response structure
       if (!data.result) {
         throw new Error("Invalid response: missing parsed data");
       }
 
-      // Handle successful upload
+      // Handle successful upload - Use correct field names from backend response
       const updatedData = {
         ...data.result,
         "Resume file": selectedFile.name,
-        "Resume URL": data.uploadthing_url
+        "Resume URL": data.cloudinary_url // Backend returns cloudinary_url
       };
 
       setParsedData(updatedData);
       setEditedData(updatedData);
 
-      if (data.uploadthing_url) {
+      if (data.cloudinary_url) {
         const newFile: UploadedFile = {
-          url: data.uploadthing_url,
+          url: data.cloudinary_url,
           name: selectedFile.name,
           uploadDate: new Date().toISOString()
         };
@@ -433,7 +440,7 @@ const SeekerProfile: React.FC = () => {
       // Better error categorization
       let errorMessage = "Failed to process resume";
 
-      if (error.message?.includes("Network") || !navigator.onLine) {
+      if (error.message?.includes("Network") || !navigator?.onLine) {
         errorMessage = "Network error. Please check your connection.";
       } else if (error.message?.includes("timeout")) {
         errorMessage = "Upload timeout. Please try a smaller file.";
@@ -815,7 +822,7 @@ const SeekerProfile: React.FC = () => {
         </View>
 
         {/* Development Environment Info */}
-        { (
+        {isUsingLocalhost() && (
           <View style={styles.infoCard}>
             <View style={styles.infoHeader}>
               <Ionicons name="information-circle" size={20} color="#2563eb" />
@@ -1091,7 +1098,7 @@ const SeekerProfile: React.FC = () => {
                 Upload a resume below to automatically extract your professional information
               </Text>
               <Text style={styles.emptyStateSubtext}>
-                Backend will handle UploadThing upload and AI parsing automatically
+                Backend will handle Cloudinary upload and AI parsing automatically
               </Text>
             </View>
           )}
@@ -1137,7 +1144,7 @@ const SeekerProfile: React.FC = () => {
           <Text style={styles.cardDescription}>
             {parsedData?.["Resume file"]
               ? "Upload a new resume file to update your profile with latest information"
-              : "Select your resume file - backend will handle UploadThing upload and AI parsing automatically"
+              : "Select your resume file - backend will handle Cloudinary upload and AI parsing automatically"
             }
           </Text>
 
@@ -1203,7 +1210,7 @@ const SeekerProfile: React.FC = () => {
           <View style={styles.uploadStatusContainer}>
             <View style={styles.statusItem}>
               <Ionicons name="shield-checkmark-outline" size={16} color="#059669" />
-              <Text style={styles.statusText}>Backend handles UploadThing upload automatically</Text>
+              <Text style={styles.statusText}>Backend handles Cloudinary upload automatically</Text>
             </View>
             <View style={styles.statusItem}>
               <Ionicons name="bulb-outline" size={16} color="#7c3aed" />
@@ -1226,7 +1233,6 @@ const SeekerProfile: React.FC = () => {
 
 export default SeekerProfile;
 
-// Styles remain the same as in your original code
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -1310,30 +1316,6 @@ const styles = StyleSheet.create({
     fontWeight: "500",
     color: "#dc2626",
     marginLeft: 4,
-  },
-  warningCard: {
-    backgroundColor: "#fffbeb",
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 20,
-    borderWidth: 1,
-    borderColor: "#fed7aa",
-  },
-  warningHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 8,
-  },
-  warningTitle: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: "#d97706",
-    marginLeft: 8,
-  },
-  warningText: {
-    fontSize: 14,
-    color: "#92400e",
-    lineHeight: 20,
   },
   infoCard: {
     backgroundColor: "#f0f9ff",
