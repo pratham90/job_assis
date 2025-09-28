@@ -19,7 +19,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 // Configuration - Use environment variable for API base URL
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || "https://fastapiserver-pja0.onrender.com";
+const API_BASE_URL = "http://0.0.0.0:8000";
 
 // Helper functions
 const isUsingLocalhost = (): boolean => {
@@ -369,17 +369,33 @@ const SeekerProfile: React.FC = () => {
       const formData = new FormData();
       formData.append("clerk_id", clerkId);
       formData.append("user_role", String(userRole || "job_seeker"));
-
-      // For React Native, append the file correctly
-      formData.append("file", {
-        uri: selectedFile.uri,
-        type: selectedFile.mimeType || "application/pdf",
-        name: selectedFile.name,
-      } as any);
+      // FIXED: Correct way to append file in React Native/Web
+      // Check if we're in a web environment
+      if (Platform.OS === 'web') {
+        // For web, we need to create a proper File object
+        const response = await fetch(selectedFile.uri);
+        const blob = await response.blob();
+        const file = new File([blob], selectedFile.name, {
+          type: selectedFile.mimeType || "application/pdf"
+        });
+        formData.append("file", file);
+      } else {
+        // For React Native, use the correct format
+        formData.append("file", {
+          uri: selectedFile.uri,
+          type: selectedFile.mimeType || "application/pdf",
+          name: selectedFile.name,
+        } as any);
+      }
 
       // Use correct endpoint URL
       const uploadUrl = `${API_BASE_URL}/api/users/upload`;
       console.log("Uploading to:", uploadUrl);
+      console.log("File details:", {
+        name: selectedFile.name,
+        size: selectedFile.size,
+        type: selectedFile.mimeType
+      });
 
       const response = await fetch(uploadUrl, {
         method: "POST",
@@ -399,6 +415,12 @@ const SeekerProfile: React.FC = () => {
           errorData = JSON.parse(errorText);
         } catch {
           throw new Error(`Upload failed with status ${response.status}: ${errorText}`);
+        }
+
+        // Better error message handling
+        if (errorData.detail && Array.isArray(errorData.detail)) {
+          const firstError = errorData.detail[0];
+          throw new Error(firstError.msg || "Validation error");
         }
         throw new Error(errorData.detail || errorData.message || `Upload failed`);
       }
@@ -440,12 +462,14 @@ const SeekerProfile: React.FC = () => {
       // Better error categorization
       let errorMessage = "Failed to process resume";
 
-      if (error.message?.includes("Network") || !navigator?.onLine) {
+      if (error.message?.includes("Network") || (typeof navigator !== 'undefined' && !navigator?.onLine)) {
         errorMessage = "Network error. Please check your connection.";
       } else if (error.message?.includes("timeout")) {
         errorMessage = "Upload timeout. Please try a smaller file.";
       } else if (error.message?.includes("Invalid response")) {
         errorMessage = "Server processing error. Please try again.";
+      } else if (error.message?.includes("Expected UploadFile")) {
+        errorMessage = "File format error. Please try selecting the file again.";
       } else if (error.message) {
         errorMessage = error.message;
       }
