@@ -19,7 +19,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 // Configuration - Use environment variable for API base URL
-const API_BASE_URL = "http://0.0.0.0:8000";
+const API_BASE_URL = "http://127.0.0.1:8000";
 
 // Helper functions
 const isUsingLocalhost = (): boolean => {
@@ -34,6 +34,11 @@ const getEnvironmentInfo = () => {
     isLocalhost: usingLocalhost,
     environment: usingLocalhost ? 'Development (Local)' : 'Production/Staging'
   };
+};
+
+const normalizeRole = (role: string | undefined): string => {
+  if (!role) return "job_seeker";
+  return role.toLowerCase().replace(/\s+/g, '_');
 };
 
 // Interfaces
@@ -102,7 +107,7 @@ const SeekerProfile: React.FC = () => {
   const router = useRouter();
 
   // User metadata
-  const userRole = user?.unsafeMetadata?.role || "job_seeker";
+  const userRole = normalizeRole(user?.unsafeMetadata?.role as string | undefined);
   const isNew = user?.unsafeMetadata?.new;
 
   // State management
@@ -263,7 +268,7 @@ const SeekerProfile: React.FC = () => {
         willing_to_relocate: profileData["Willing to relocate"],
 
         // Professional Info
-        role: profileData.Role,
+        role: normalizeRole(profileData.Role),
         current_company: profileData["Company details"],
         resume_filename: profileData["Resume file"],
         resume_url: profileData["Resume URL"],
@@ -368,7 +373,7 @@ const SeekerProfile: React.FC = () => {
     try {
       const formData = new FormData();
       formData.append("clerk_id", clerkId);
-      formData.append("user_role", String(userRole || "job_seeker"));
+      formData.append("user_role", normalizeRole(userRole));
       // FIXED: Correct way to append file in React Native/Web
       // Check if we're in a web environment
       if (Platform.OS === 'web') {
