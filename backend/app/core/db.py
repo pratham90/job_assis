@@ -1,3 +1,5 @@
+# app/core/db.py - FIXED VERSION
+
 from typing import List, Optional
 from bson import ObjectId
 import os
@@ -32,8 +34,8 @@ class Database:
         """Initialize the web scraper only when needed"""
         if self.scraper is None:
             try:
-                # Import your RedisCachedJobScraper class
-                from job_scraper import RedisCachedJobScraper
+                # FIXED: Import from the correct module path
+                from app.job_scraper import RedisCachedJobScraper
                 
                 # Extract Redis connection details from URI
                 redis_parts = redis_uri.split('@')
