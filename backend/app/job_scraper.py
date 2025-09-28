@@ -167,7 +167,7 @@ class LinkedInJobScraper:
         
         return 'Other'
     
-    def build_search_params(self, keywords: str = "software engineer", location: str = "United States", 
+    def build_search_params(self, keywords: str = "software engineer", location: str = "India", 
                           start: int = 0, count: int = 25, job_type_filter: str = None) -> Dict:
         """Build search parameters for LinkedIn API"""
         params = {
@@ -529,7 +529,7 @@ class LinkedInJobScraper:
         # This should never be reached, but just in case
         raise Exception(f"Request failed after {max_retries} attempts")
 
-    def scrape_jobs(self, keywords: str = "software engineer", location: str = "United States",
+    def scrape_jobs(self, keywords: str = "software engineer", location: str = "India",
                    max_jobs: int = 50, job_type_filter: str = None, category_filter: str = None,
                    trusted_only: bool = True) -> List[Dict]:
         """Main method to scrape LinkedIn jobs with advanced filtering and retry logic"""
@@ -1099,7 +1099,7 @@ class RedisCachedJobScraper:
             logger.error(f"Failed to initialize RedisCachedJobScraper: {str(e)}")
             raise
     
-    def get_jobs(self, keywords: str = "software engineer", location: str = "United States",
+    def get_jobs(self, keywords: str = "software engineer", location: str = "India",
                 max_jobs: int = 50, job_type_filter: str = None, category_filter: str = None,
                 trusted_only: bool = True, force_refresh: bool = False) -> List[Dict]:
         """Get jobs with Redis caching support"""
@@ -1121,7 +1121,7 @@ class RedisCachedJobScraper:
             # Search individual cached jobs
             cached_jobs = self.search_cached_jobs(
                 title_keyword=keywords,
-                location_keyword=location if location != "United States" else None,
+                location_keyword=location if location != "India" else None,
                 trusted_only=trusted_only,
                 limit=max_jobs * 2
             )
@@ -1178,7 +1178,7 @@ class RedisCachedJobScraper:
                     continue
             
             # Location match
-            if location and location.lower() != "united states":
+            if location and location.lower() != "India":
                 if location_lower not in job.get('location', '').lower():
                     continue
             

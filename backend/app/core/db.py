@@ -1,4 +1,4 @@
-# app/core/db.py - FIXED VERSION
+# app/core/db.py - COMPLETE FIXED VERSION
 
 from typing import List, Optional
 from bson import ObjectId
@@ -9,6 +9,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 import logging
 from datetime import datetime
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +20,8 @@ mongo_uri = os.getenv("MONGO_URI", "mongodb+srv://Backend-1:Backend-1@cluster0.q
 class Database:
     def __init__(self):
         self.redis_client = redis.from_url(redis_uri, decode_responses=True)
-        # MongoDB for user profiles and user-posted jobs
         self.mongo_client = AsyncIOMotorClient(mongo_uri)
         self.mongo_db = self.mongo_client.Tinder_Job
-        
-        # Initialize web scraper (will be imported when needed)
         self.scraper = None
         
         print(f"🔗 Database connections initialized:")
@@ -34,20 +32,16 @@ class Database:
         """Initialize the web scraper only when needed"""
         if self.scraper is None:
             try:
-                # FIXED: Import from the correct module path
                 from app.job_scraper import RedisCachedJobScraper
                 
-                # Extract Redis connection details from URI
                 redis_parts = redis_uri.split('@')
                 if len(redis_parts) == 2:
-                    # Has authentication  
                     auth_part = redis_parts[0].split('//')[1]
                     host_part = redis_parts[1]
                     password = auth_part.split(':')[1] if ':' in auth_part else None
                     host = host_part.split(':')[0]
                     port = int(host_part.split(':')[1].split('/')[0])
                 else:
-                    # No authentication
                     host = 'localhost'
                     port = 6379
                     password = None
@@ -63,13 +57,101 @@ class Database:
             except Exception as e:
                 logger.error(f"Failed to initialize web scraper: {e}")
                 self.scraper = None
+
+    def _normalize_employment_type(self, employment_type: str) -> str:
+        """Convert employment type to expected enum values"""
+        if not employment_type:
+            return 'full_time'
+        
+        employment_type = employment_type.lower().strip()
+        
+        type_mapping = {
+            'full-time': 'full_time',
+            'full time': 'full_time', 
+            'fulltime': 'full_time',
+            'permanent': 'full_time',
+            'part-time': 'part_time',
+            'part time': 'part_time',
+            'parttime': 'part_time',
+            'contract': 'contract',
+            'contractor': 'contract',
+            'freelance': 'contract',
+            'temporary': 'contract',
+            'temp': 'contract',
+            'intern': 'internship',
+            'internship': 'internship',
+            'graduate': 'internship'
+        }
+        
+        return type_mapping.get(employment_type, 'full_time')
+
+    def _parse_salary_string(self, salary_str: str) -> dict:
+        """Parse salary string into SalaryRange format"""
+        if not salary_str or salary_str.strip() == '':
+            return {
+                "min": 0,
+                "max": 0,
+                "currency": "USD",
+                "is_public": False
+            }
+        
+        # Extract numbers from salary string
+        numbers = re.findall(r'[\d,]+', salary_str.replace(',', ''))
+        
+        # Determine currency
+        currency = "USD"
+        if any(indicator in salary_str.lower() for indicator in ['lakh', 'lpa', '₹', 'inr']):
+            currency = "INR"
+        elif '€' in salary_str or 'eur' in salary_str.lower():
+            currency = "EUR"
+        elif '£' in salary_str or 'gbp' in salary_str.lower():
+            currency = "GBP"
+        
+        # Parse salary range
+        if len(numbers) >= 2:
+            try:
+                min_salary = int(numbers[0])
+                max_salary = int(numbers[1])
+                
+                # Handle cases where salaries are in thousands
+                if 'k' in salary_str.lower():
+                    min_salary *= 1000
+                    max_salary *= 1000
+                    
+                return {
+                    "min": min_salary,
+                    "max": max_salary,
+                    "currency": currency,
+                    "is_public": True
+                }
+            except ValueError:
+                pass
+        elif len(numbers) == 1:
+            try:
+                salary = int(numbers[0])
+                if 'k' in salary_str.lower():
+                    salary *= 1000
+                return {
+                    "min": salary,
+                    "max": salary,
+                    "currency": currency,
+                    "is_public": True
+                }
+            except ValueError:
+                pass
+        
+        return {
+            "min": 0,
+            "max": 0,
+            "currency": currency,
+            "is_public": False
+        }
     
     async def get_user_by_clerk_id(self, clerk_id: str) -> Optional[dict]:
         """Get user by Clerk ID from MongoDB"""
         try:
             print(f"🔍 Searching for user with clerk_id: {clerk_id}")
             
-            # First, let's check if the users collection exists and has any data
             user_count = await self.mongo_db.users.count_documents({})
             print(f"📊 Total users in MongoDB: {user_count}")
             
@@ -77,7 +159,6 @@ class Database:
                 print("⚠️  No users found in MongoDB users collection")
                 return None
             
-            # List all users to see what's available
             all_users = await self.mongo_db.users.find({}, {"clerk_id": 1, "email": 1, "first_name": 1}).to_list(10)
             print(f"👥 Available users:")
             for user in all_users:
@@ -86,7 +167,6 @@ class Database:
             user_data = await self.mongo_db.users.find_one({"clerk_id": clerk_id})
             if user_data:
                 print(f"✅ User found: {user_data.get('first_name', 'N/A')} {user_data.get('last_name', 'N/A')}")
-                # Convert ObjectId to string for JSON serialization
                 user_data["_id"] = str(user_data["_id"])
                 return user_data
             else:
@@ -119,26 +199,12 @@ class Database:
     
     async def get_active_jobs(self, limit: int = 1000, 
                             keywords: str = "software engineer", 
-                            location: str = "United States",
+                            location: str = "India",
                             job_type_filter: str = None, 
                             category_filter: str = None,
                             trusted_only: bool = True,
                             force_scrape: bool = False) -> List[dict]:
-        """
-        Get all active job postings with 3-step priority:
-        1st: Posted jobs from MongoDB
-        2nd: Scraped jobs from Redis cache  
-        3rd: Fresh web scraping if not enough jobs found
-        
-        Args:
-            limit: Maximum number of jobs to return
-            keywords: Job search keywords for scraping
-            location: Location for job search
-            job_type_filter: Filter by job type
-            category_filter: Filter by category
-            trusted_only: Only trusted companies
-            force_scrape: Skip cache and force fresh scraping
-        """
+        """Get all active job postings with 3-step priority and loop prevention"""
         all_jobs = []
         
         print(f"🎯 Starting 3-step job search (limit: {limit})")
@@ -155,15 +221,15 @@ class Database:
                     "job_type": 1, "location_1": 1, "skills": 1, "requirements": 1,
                     "category": 1, "source": 1, "created_at": 1, "posted_time": 1
                 }
-            ).to_list(100)  # Limit MongoDB jobs to 100
+            ).to_list(100)
             
             print(f"✅ Found {len(posted_jobs)} posted jobs in MongoDB")
             
-            for i, job in enumerate(posted_jobs):
+            for job in posted_jobs:
                 converted_job = self._convert_mongo_job(job)
                 if converted_job:
                     converted_job["source"] = "posted"
-                    converted_job["priority"] = 1.0  # Highest priority
+                    converted_job["priority"] = 1.0
                     all_jobs.append(converted_job)
                     
             print(f"✅ Successfully processed {len([j for j in all_jobs if j.get('source') == 'posted'])} MongoDB jobs")
@@ -177,21 +243,22 @@ class Database:
             try:
                 print(f"\n🔄 STEP 2: Fetching cached jobs from Redis (need {remaining_needed} more)...")
                 
-                # Get scraped jobs from Redis cache
                 job_keys = await self.redis_client.keys("job-scraping:*")
                 scraped_count = 0
                 
                 print(f"📊 Found {len(job_keys)} cached job keys in Redis")
                 
-                for key in job_keys[:remaining_needed * 2]:  # Get more to allow filtering
+                # LOOP PREVENTION: Limit the keys we process
+                max_keys_to_process = min(len(job_keys), remaining_needed * 3, 200)  # Cap at 200
+                
+                for key in job_keys[:max_keys_to_process]:
                     job_data = await self.redis_client.hgetall(key)
                     if job_data:
-                        # Filter based on search criteria
                         if self._matches_search_criteria(job_data, keywords, location, job_type_filter, category_filter, trusted_only):
                             converted_job = self._convert_scraped_job(job_data)
                             if converted_job:
                                 converted_job["source"] = "scraped"
-                                converted_job["priority"] = 0.7  # Medium priority
+                                converted_job["priority"] = 0.7
                                 all_jobs.append(converted_job)
                                 scraped_count += 1
                                 
@@ -205,22 +272,31 @@ class Database:
         
         # ============= STEP 3: WEB SCRAPING IF NEEDED =============
         remaining_needed = limit - len(all_jobs)
-        if remaining_needed > 0 and not force_scrape:
+        
+        # LOOP PREVENTION: Only scrape if we have very few jobs and haven't scraped recently
+        should_scrape = (
+            remaining_needed > 0 and 
+            len(all_jobs) < max(50, limit * 0.1) and  # Only if we have less than 10% of requested or minimum 50
+            not force_scrape
+        )
+        
+        if should_scrape:
             try:
                 print(f"\n🕷️  STEP 3: Web scraping needed (need {remaining_needed} more jobs)...")
                 
-                # Initialize scraper if needed
                 self._initialize_scraper()
                 
                 if self.scraper:
                     print(f"🔍 Starting fresh web scraping...")
                     print(f"   Search params: keywords='{keywords}', location='{location}'")
                     
-                    # Use the cached scraper which will handle Redis caching internally
+                    # LIMIT SCRAPING: Cap the number of jobs to scrape
+                    max_scrape_jobs = min(remaining_needed, 100)  # Max 100 fresh jobs
+                    
                     scraped_jobs = self.scraper.get_jobs(
                         keywords=keywords,
                         location=location,
-                        max_jobs=remaining_needed,
+                        max_jobs=max_scrape_jobs,
                         job_type_filter=job_type_filter,
                         category_filter=category_filter,
                         trusted_only=trusted_only,
@@ -229,14 +305,12 @@ class Database:
                     
                     print(f"✅ Web scraping returned {len(scraped_jobs)} fresh jobs")
                     
-                    # Convert and add scraped jobs
                     fresh_jobs_added = 0
                     for job in scraped_jobs:
-                        # Convert from scraper format to our format
                         converted_job = self._convert_scraped_job_format(job)
                         if converted_job:
                             converted_job["source"] = "fresh_scraped"
-                            converted_job["priority"] = 0.5  # Lower priority
+                            converted_job["priority"] = 0.5
                             all_jobs.append(converted_job)
                             fresh_jobs_added += 1
                     
@@ -247,6 +321,8 @@ class Database:
                     
             except Exception as e:
                 print(f"❌ Error during web scraping: {e}")
+        else:
+            print(f"\n⏸️  STEP 3: Skipping web scraping (have {len(all_jobs)} jobs, sufficient for now)")
         
         # ============= FINAL RESULTS =============
         print(f"\n📊 === FINAL JOB SUMMARY ===")
@@ -262,13 +338,15 @@ class Database:
         
         # Sort by priority and return limited results
         all_jobs.sort(key=lambda x: x.get('priority', 0), reverse=True)
-        return all_jobs[:limit]
+        final_jobs = all_jobs[:limit]
+        
+        print(f"🎯 Returning {len(final_jobs)} jobs to recommendation system")
+        return final_jobs
     
     def _matches_search_criteria(self, job_data: dict, keywords: str, location: str, 
                                job_type_filter: str, category_filter: str, trusted_only: bool) -> bool:
         """Check if a Redis job matches the search criteria"""
         try:
-            # Keywords match (check title and description)
             if keywords:
                 keywords_lower = keywords.lower()
                 title_match = keywords_lower in job_data.get('title', '').lower()
@@ -276,26 +354,22 @@ class Database:
                 if not (title_match or desc_match):
                     return False
             
-            # Location match
-            if location and location.lower() != "united states":
+            if location and location.lower() != "India":
                 location_lower = location.lower()
                 job_location = job_data.get('location', '').lower()
                 if location_lower not in job_location:
                     return False
             
-            # Job type filter
             if job_type_filter:
                 job_type = job_data.get('employment_type', job_data.get('job_type', '')).lower()
                 if job_type_filter.lower() not in job_type:
                     return False
             
-            # Category filter
             if category_filter and category_filter != 'All':
                 job_category = job_data.get('category', '')
                 if category_filter not in job_category:
                     return False
             
-            # Trusted companies filter
             if trusted_only:
                 is_trusted = job_data.get('is_trusted_company', False)
                 if not is_trusted:
@@ -310,7 +384,12 @@ class Database:
     def _convert_scraped_job_format(self, job_data: dict) -> dict:
         """Convert job data from scraper format to our expected format"""
         try:
-            # Handle different possible field names from scraper
+            raw_employment_type = job_data.get('employment_type', job_data.get('job_type', 'Full-time'))
+            normalized_employment_type = self._normalize_employment_type(raw_employment_type)
+            
+            raw_salary = job_data.get('salary', '')
+            parsed_salary = self._parse_salary_string(raw_salary)
+            
             return {
                 "id": job_data.get('job_id', job_data.get('id', '')),
                 "employer_id": job_data.get('company', job_data.get('employer_id', '')),
@@ -318,15 +397,14 @@ class Database:
                 "description": job_data.get('description', job_data.get('responsibilities', '')),
                 "requirements": job_data.get('requirements', []) if isinstance(job_data.get('requirements'), list) else [job_data.get('requirements', '')],
                 "responsibilities": job_data.get('responsibilities', []) if isinstance(job_data.get('responsibilities'), list) else [job_data.get('responsibilities', '')],
-                "employment_type": job_data.get('employment_type', job_data.get('job_type', 'full_time')),
-                "salary": job_data.get('salary', {"min": 0, "max": 0, "currency": "USD", "is_public": False}),
+                "employment_type": normalized_employment_type,
+                "salary": parsed_salary,
                 "location": self._parse_location(job_data.get('location', '')),
                 "skills_required": job_data.get('skills', job_data.get('skills_required', [])),
                 "benefits": job_data.get('benefits', []),
                 "is_active": True,
                 "posted_at": job_data.get('posted_date', job_data.get('posted_at', datetime.now().strftime('%Y-%m-%d'))),
                 "expires_at": job_data.get('expires_at', '2024-12-31'),
-                # Additional fields
                 "company": job_data.get('company', ''),
                 "url": job_data.get('url', job_data.get('job_link', '')),
                 "experience_level": job_data.get('experience_level', ''),
@@ -352,27 +430,15 @@ class Database:
     def _convert_mongo_job(self, job_data: dict) -> dict:
         """Convert MongoDB job data to our expected format"""
         try:
-            # Parse skills from string to list
             skills = []
             if job_data.get('skills'):
                 skills = [skill.strip() for skill in job_data['skills'].split(',') if skill.strip()]
             
-            # Parse location
             location_str = job_data.get('location_1', '')
             location = self._parse_location(location_str)
             
-            # Convert job type
-            job_type = job_data.get('job_type', 'Full-time').lower()
-            if 'full' in job_type:
-                employment_type = 'full_time'
-            elif 'part' in job_type:
-                employment_type = 'part_time'
-            elif 'contract' in job_type:
-                employment_type = 'contract'
-            elif 'intern' in job_type:
-                employment_type = 'internship'
-            else:
-                employment_type = 'full_time'
+            raw_job_type = job_data.get('job_type', 'Full-time')
+            normalized_employment_type = self._normalize_employment_type(raw_job_type)
             
             return {
                 "id": str(job_data.get("_id", "")),
@@ -381,7 +447,7 @@ class Database:
                 "description": job_data.get("description_text", ""),
                 "requirements": [job_data.get("requirements", "")] if job_data.get("requirements") else [],
                 "responsibilities": [],
-                "employment_type": employment_type,
+                "employment_type": normalized_employment_type,
                 "salary": {"min": 0, "max": 0, "currency": "USD", "is_public": False},
                 "location": location,
                 "skills_required": skills,
@@ -401,7 +467,6 @@ class Database:
     def _convert_scraped_job(self, job_data: dict) -> dict:
         """Convert scraped job data to our expected format"""
         try:
-            # Parse skills and requirements from strings to lists
             skills = []
             if job_data.get('skills'):
                 try:
@@ -423,23 +488,15 @@ class Database:
                 except:
                     responsibilities = [job_data['responsibilities']] if job_data['responsibilities'] else []
             
-            # Parse salary if available
-            salary = {"min": 0, "max": 0, "currency": "USD", "is_public": False}
-            if job_data.get('salary') and job_data['salary'].strip():
-                salary_text = job_data['salary'].lower()
-                if 'lakh' in salary_text or 'lpa' in salary_text:
-                    salary["currency"] = "INR"
-                salary["is_public"] = True
+            raw_salary = job_data.get('salary', '')
+            parsed_salary = self._parse_salary_string(raw_salary)
             
-            # Parse location
             location = self._parse_location(job_data.get('location', ''))
             if not location["country"]:
-                location["country"] = "India"  # Default for scraped jobs
+                location["country"] = "India"
             
-            # Convert employment type
-            employment_type = job_data.get('employment_type', 'full_time').lower()
-            if employment_type not in ['full_time', 'part_time', 'contract', 'internship']:
-                employment_type = 'full_time'
+            raw_employment_type = job_data.get('employment_type', 'full_time')
+            normalized_employment_type = self._normalize_employment_type(raw_employment_type)
             
             return {
                 "id": job_data.get('job_id', ''),
@@ -448,8 +505,8 @@ class Database:
                 "description": job_data.get('responsibilities', ''),
                 "requirements": requirements,
                 "responsibilities": responsibilities,
-                "employment_type": employment_type,
-                "salary": salary,
+                "employment_type": normalized_employment_type,
+                "salary": parsed_salary,
                 "location": location,
                 "skills_required": skills,
                 "benefits": [],
