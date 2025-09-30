@@ -105,10 +105,11 @@ export default function SignUpScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.formContainer}>
-        <Text style={styles.title}>Sign up</Text>
-        
-        <TextInput
+    <View style={styles.formContainer}>
+      <Text style={styles.title}>Sign up</Text>
+      <View id="clerk-captcha" />
+
+      <TextInput
           style={styles.input}
           autoCapitalize="none"
           value={emailAddress}

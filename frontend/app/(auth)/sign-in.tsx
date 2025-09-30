@@ -51,7 +51,8 @@ export default function SignInScreen() {
     <SafeAreaView style={styles.container}>
       <View style={styles.formContainer}>
         <Text style={styles.title}>Sign in</Text>
-        
+        <View id="clerk-captcha" />
+
         <TextInput
           style={styles.input}
           autoCapitalize="none"
