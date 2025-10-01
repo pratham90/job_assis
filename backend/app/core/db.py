@@ -544,6 +544,43 @@ class Database:
             return json.loads(job_data)
         return None
     
+    async def enqueue_user_jobs(self, clerk_id: str, jobs: List[dict]) -> int:
+        """Enqueue related jobs into a per-user Redis list queue.
+        Stores as JSON strings; returns number enqueued.
+        Key format: queue:recommendations:{clerk_id}
+        """
+        try:
+            if not jobs:
+                return 0
+            key = f"queue:recommendations:{clerk_id}"
+            # Avoid duplicates by using a set of job ids currently in queue
+            existing = await self.redis_client.lrange(key, 0, -1)
+            existing_ids = set()
+            for item in existing:
+                try:
+                    doc = json.loads(item)
+                    jid = str(doc.get("_id") or doc.get("id") or "")
+                    if jid:
+                        existing_ids.add(jid)
+                except Exception:
+                    continue
+            to_push = []
+            for job in jobs:
+                jid = str(job.get("_id") or job.get("id") or "")
+                if not jid or jid in existing_ids:
+                    continue
+                to_push.append(json.dumps(job))
+            enqueued = 0
+            if to_push:
+                # Push to the right to preserve order
+                enqueued = await self.redis_client.rpush(key, *to_push)
+                # Set a TTL of 48 hours
+                await self.redis_client.expire(key, 48 * 3600)
+            return int(enqueued if enqueued is not None else 0)
+        except Exception as e:
+            logger.error(f"Failed to enqueue jobs for {clerk_id}: {e}")
+            return 0
+    
     async def get_scraper_stats(self) -> dict:
         """Get web scraper statistics"""
         try:

@@ -17,6 +17,7 @@ import {
   View
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { API_BASE_URL } from "../utils/api";
 
 // Add your API base URL
 // const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || 'http://127.0.0.1:8000';
@@ -338,6 +339,7 @@ const ApplicationsIndex = () => {
     setLoading(true);
     checkAndResetSwipeLimit();
     loadAcceptedJobs();
+    fetchRecommendedAndDisplay();
   }, []);
   
   // React to filter/sort changes
@@ -448,6 +450,83 @@ const ApplicationsIndex = () => {
     } finally {
       setLoading(false);
       setRefreshing(false);
+    }
+  };
+
+  // Fetch recommended jobs from backend and display as applications
+  const fetchRecommendedAndDisplay = async () => {
+    try {
+      if (!user?.id) return;
+      const res = await fetch(`${API_BASE_URL}/api/recommend/${user.id}?limit=10`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const mapped: Application[] = (data || []).map((item: any) => {
+        const job = item.job ? item.job : item;
+        const id = job.id || job._id || `${Date.now()}`;
+        const company_name = job.company || job.company_name || job.employer_id || 'Unknown Company';
+        const position_title = job.title || 'Unknown Position';
+        const application_type = (job.employment_type && String(job.employment_type).toLowerCase().includes('intern')) ? 'internship' : 'job';
+        const application_date = job.posted_at || new Date().toISOString();
+        const status: Application['status'] = 'applied';
+        let keyword_match_percentage = item.match_score || job.match_score || 0;
+        if (typeof keyword_match_percentage === 'string') {
+          keyword_match_percentage = parseFloat(keyword_match_percentage);
+        }
+        if (keyword_match_percentage > 0 && keyword_match_percentage <= 1) {
+          keyword_match_percentage = Math.round(keyword_match_percentage * 100);
+        }
+        const matched_keywords: string[] = Array.isArray(job.skills_required) ? job.skills_required.slice(0, 6) : [];
+        const total_keywords = matched_keywords.length;
+        const job_description = job.description || '';
+        const application_platform = 'Recommendations';
+        const salary_range = typeof job.salary === 'string' ? job.salary : undefined;
+        let location = 'Not specified';
+        if (typeof job.location === 'string') {
+          location = job.location;
+        } else if (job.location && typeof job.location === 'object') {
+          const { city, state, country, remote } = job.location;
+          const parts = [] as string[];
+          if (city) parts.push(city);
+          if (state) parts.push(state);
+          if (country) parts.push(country);
+          location = parts.join(', ');
+          if (remote) location += ' / Remote';
+        }
+        const remote_option = typeof job.location === 'string' ? job.location.toLowerCase().includes('remote') : Boolean(job.location?.remote);
+        const tracking_history: TrackingEvent[] = [
+          {
+            id: `${id}-seed`,
+            date: new Date().toISOString().split('T')[0],
+            status: 'Applied',
+            description: 'Recommended by system',
+            type: 'status_change'
+          }
+        ];
+        return {
+          id,
+          company_name,
+          position_title,
+          application_type,
+          application_date,
+          status,
+          keyword_match_percentage: Math.max(0, Math.min(100, Math.round(keyword_match_percentage || 0))),
+          matched_keywords,
+          total_keywords,
+          job_description,
+          application_platform,
+          salary_range,
+          location,
+          remote_option,
+          tracking_history
+        } as Application;
+      });
+      if (mapped.length > 0) {
+        setApplications(mapped);
+      }
+    } catch (e) {
+      // ignore; accepted jobs view still works
+    } finally {
+      setLoading(false);
     }
   };
 

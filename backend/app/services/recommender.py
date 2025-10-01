@@ -40,11 +40,32 @@ class HybridRecommender:
         return rr
     
     async def _embed_user(self, user: UserProfile) -> np.ndarray:
-        """Async user embedding"""
+        """Async user embedding with resume-derived context if available"""
+        resume_text = ""
+        try:
+            if getattr(user, "resume", None) and isinstance(user.resume.parsed_data, dict):
+                parsed = user.resume.parsed_data or {}
+                sections = []
+                for key in [
+                    "summary", "objective", "skills", "experience", "projects",
+                    "education", "certifications", "technologies"
+                ]:
+                    value = parsed.get(key)
+                    if isinstance(value, list):
+                        sections.append(" ".join([str(v) for v in value]))
+                    elif isinstance(value, dict):
+                        sections.append(" ".join([str(v) for v in value.values()]))
+                    elif isinstance(value, str):
+                        sections.append(value)
+                resume_text = " ".join([s for s in sections if s])
+        except Exception:
+            resume_text = ""
+
         text = " ".join([
-            " ".join(user.skills),
-            " ".join(exp.title for exp in user.experience),
-            user.location or ""
+            " ".join(getattr(user, "skills", []) or []),
+            " ".join(exp.title for exp in (getattr(user, "experience", []) or [])),
+            getattr(user, "location", "") or "",
+            resume_text
         ])
         return await self.embedder.embed(text)
     

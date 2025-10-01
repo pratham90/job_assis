@@ -1,6 +1,7 @@
 import { useAuth, useUser } from "@clerk/clerk-expo";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
+import { API_BASE_URL } from "../utils/api";
 import * as Location from "expo-location";
 import React, { useEffect, useState } from "react";
 import { useSavedJobs } from "../contexts/SavedJobsContext";
@@ -156,7 +157,7 @@ export default function SeekerJobs() {
 
 
   useEffect(() => {
-    const API_BASE_URL = "http://localhost:3000";
+    // API_BASE_URL imported at top
     if (!isSignedIn || !user) return;
     const clerkId = user.id;
     const email =
@@ -166,7 +167,7 @@ export default function SeekerJobs() {
 
     const checkAndCreateUserAndFetchJobs = async () => {
       try {
-        // Try to GET user
+        // Try to GET recommendations (also validates user existence in backend flow)
         const getRes = await fetch(`${API_BASE_URL}/api/recommend/${clerkId}`);
         if (getRes.ok) {
           // User exists, fetch jobs
@@ -202,7 +203,15 @@ export default function SeekerJobs() {
           setError("Error fetching user. Please try again.");
         }
       } catch (err) {
-        setError("Exception during user check. Please try again.");
+        // Fallback for dev when Clerk is not signed in: try sample user
+        try {
+          const sample = await fetch(`${API_BASE_URL}/api/recommend/create-sample-user`, { method: 'POST' });
+          if (sample.ok) {
+            await fetchJobs('sample_user_123');
+            return;
+          }
+        } catch {}
+        setError("Could not reach backend. Ensure API URL is reachable.");
       }
     };
     checkAndCreateUserAndFetchJobs();
@@ -360,7 +369,7 @@ export default function SeekerJobs() {
     try {
       setIsLoading(true);
       setError(null);
-      const API_BASE_URL = "http://localhost:3000";
+      // API_BASE_URL imported at top
       const res = await fetch(`${API_BASE_URL}/api/recommend/${clerkId}`);
       if (!res.ok) {
         setError("Failed to fetch jobs from backend.");
@@ -477,6 +486,10 @@ export default function SeekerJobs() {
           postedTime,
         };
       });
+      try {
+        console.log("Fetched jobs count:", mappedJobs.length);
+        console.log("Fetched job titles:", mappedJobs.map(j => j.title));
+      } catch {}
       setJobs(mappedJobs);
       setAllJobs(mappedJobs);
       filterJobsByLocation("All Locations", mappedJobs);
@@ -831,6 +844,15 @@ export default function SeekerJobs() {
                 <Ionicons name="refresh-outline" size={14} color="#fff" />
                 <Text style={styles.resetButtonText}>Reset</Text>
               </TouchableOpacity>
+            )}
+            {/* Debug list to show top fetched job titles */}
+            {jobs.length > 0 && (
+              <View style={{ marginTop: 8, alignItems: 'center' }}>
+                <Text style={{ color: '#cbd5e1', fontSize: 11, marginBottom: 4 }}>Top jobs from backend:</Text>
+                {jobs.slice(0, 5).map((j, idx) => (
+                  <Text key={j.id || idx} style={{ color: '#cbd5e1', fontSize: 10 }}>{idx + 1}. {j.title} • {j.company}</Text>
+                ))}
+              </View>
             )}
           </View>
         )}

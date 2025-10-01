@@ -179,10 +179,44 @@ async def get_recommendations(
         user_converted = convert_mongo_doc(user)
         user_model = UserProfile(**user_converted)
 
-        # 3. Fetch active jobs with required fields
-        jobs = await db.get_active_jobs()
+        # 3. Build search params from user resume/skills and fetch up to 100 jobs
+        keywords_parts = []
+        if user.get("skills"):
+            keywords_parts.extend(user.get("skills")[:5])
+        # Pull common resume keywords if available
+        try:
+            if user.get("resume") and isinstance(user["resume"].get("parsed_data"), dict):
+                parsed = user["resume"]["parsed_data"]
+                resume_keywords = []
+                for k in ["skills", "technologies", "experience", "projects"]:
+                    v = parsed.get(k)
+                    if isinstance(v, list):
+                        resume_keywords.extend([str(s) for s in v[:5]])
+                    elif isinstance(v, str):
+                        resume_keywords.extend(v.split()[:5])
+                keywords_parts.extend(resume_keywords[:10])
+        except Exception:
+            pass
+
+        derived_keywords = " ".join(dict.fromkeys([kp for kp in keywords_parts if isinstance(kp, str)])) or "software engineer"
+        derived_location = user.get("location") or "India"
+
+        jobs = await db.get_active_jobs(limit=100, keywords=derived_keywords, location=derived_location)
         if not jobs:
-            raise HTTPException(status_code=404, detail="No active jobs found")
+            # Relax filters and retry instead of hard 404
+            try:
+                jobs = await db.get_active_jobs(
+                    limit=100,
+                    keywords=derived_keywords or "software engineer",
+                    location=derived_location or "India",
+                    trusted_only=False,
+                    force_scrape=False
+                )
+            except Exception:
+                jobs = []
+        if not jobs:
+            # Return empty list so UI can handle gracefully
+            return []
 
         # 4. Convert job documents
         job_models = []
@@ -217,7 +251,33 @@ async def get_recommendations(
         print(f"\n✅ Returning {min(len(recommendations), limit)} recommendations")
         print(f"=====================================")
         
-        # 7. Return top N recommendations
+        # 7. Enqueue remaining related jobs (beyond the first page)
+        try:
+            # Map id->original dict for queuing
+            id_to_dict = {}
+            for job in jobs:
+                try:
+                    converted = convert_mongo_doc(job)
+                    id_to_dict[str(converted.get("_id", converted.get("id", "")))] = converted
+                except Exception:
+                    continue
+
+            remaining = [job for job, _ in recommendations[limit:100]]
+            queue_payload = []
+            for job in remaining:
+                jid = getattr(job, "id", None)
+                if not jid:
+                    continue
+                # Prefer the dict if available; otherwise dump from model
+                payload = id_to_dict.get(str(jid)) or job.model_dump(by_alias=True)
+                queue_payload.append(payload)
+
+            if queue_payload:
+                await db.enqueue_user_jobs(clerk_id, queue_payload)
+        except Exception as e:
+            print(f"Queueing related jobs failed: {e}")
+
+        # 8. Return top N recommendations
         return [
             JobRecommendation(job=job, match_score=score)
             for job, score in recommendations[:limit]
