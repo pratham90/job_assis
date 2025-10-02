@@ -53,9 +53,16 @@ class JobPosting(BaseModel):
     benefits: List[str] = Field(default_factory=list)
     is_active: bool = True
     posted_at: datetime = Field(default_factory=datetime.utcnow)
-    expires_at: datetime = Field(
-        default_factory=lambda: datetime.utcnow() + timedelta(days=30)
-    )
+    expires_at: Optional[datetime] = Field(default=None)
+    
+    # Additional fields for job sources and metadata
+    source: Optional[str] = Field(default="unknown")
+    priority: Optional[float] = Field(default=0.5)
+    company: Optional[str] = Field(default="Unknown Company")
+    url: Optional[str] = Field(default="")
+    experience_level: Optional[str] = Field(default="Not specified")
+    category: Optional[str] = Field(default="General")
+    is_trusted_company: Optional[bool] = Field(default=False)
 
 
 class JobRecommendation(BaseModel):

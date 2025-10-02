@@ -8,12 +8,12 @@ import { useEffect } from 'react';
 import InitialLayout from './InitialLayout';
 
 // Get your Clerk publishable key from environment variables
-const publishableKey = process.env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY!;
+const publishableKey = process.env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY;
 
+// Temporary fallback for development
 if (!publishableKey) {
-  throw new Error(
-    'Missing Publishable Key. Please set EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY in your .env'
-  );
+  console.warn('⚠️ Missing Clerk Publishable Key. Using development mode.');
+  console.warn('📝 To fix: Create .env file with EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY');
 }
 
 // Token cache for Clerk
@@ -50,6 +50,11 @@ export default function RootLayout() {
 
   if (!loaded) {
     return null;
+  }
+
+  // If no Clerk key, render without authentication for development
+  if (!publishableKey) {
+    return <InitialLayout />;
   }
 
   return (

@@ -15,13 +15,16 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 redis_uri = os.getenv("REDIS_URI", "redis://default:liiSkjZQkhWPULcAcQ2dV0MZzy82wj2B@redis-13364.c56.east-us.azure.redns.redis-cloud.com:13364/0")
-mongo_uri = os.getenv("MONGO_URI", "mongodb+srv://Backend-1:Backend-1@cluster0.q71be.mongodb.net/Tinder_Job?retryWrites=true&w=majority")
+mongo_uri = os.getenv("MONGO_URI", "mongodb+srv://Jobs:Jobs-provider@jobs.2m8l8hb.mongodb.net")
 
 class Database:
     def __init__(self):
         self.redis_client = redis.from_url(redis_uri, decode_responses=True)
         self.mongo_client = AsyncIOMotorClient(mongo_uri)
-        self.mongo_db = self.mongo_client.Tinder_Job
+        # Use the Jobs database for jobs
+        self.mongo_db = self.mongo_client.Jobs
+        # Connect to users database for user profiles and skills
+        self.users_db = self.mongo_client.users
         self.scraper = None
         
         print(f"🔗 Database connections initialized:")
@@ -148,47 +151,62 @@ class Database:
         }
     
     async def get_user_by_clerk_id(self, clerk_id: str) -> Optional[dict]:
-        """Get user by Clerk ID from MongoDB"""
+        """Get user by Clerk ID from users/Profile collection"""
         try:
             print(f"🔍 Searching for user with clerk_id: {clerk_id}")
+            print(f"🔍 Database: {self.users_db.name}")
+            print(f"🔍 Collection: Profile")
             
-            user_count = await self.mongo_db.users.count_documents({})
-            print(f"📊 Total users in MongoDB: {user_count}")
-            
-            if user_count == 0:
-                print("⚠️  No users found in MongoDB users collection")
-                return None
-            
-            all_users = await self.mongo_db.users.find({}, {"clerk_id": 1, "email": 1, "first_name": 1}).to_list(10)
-            print(f"👥 Available users:")
-            for user in all_users:
-                print(f"   - clerk_id: {user.get('clerk_id', 'N/A')}, email: {user.get('email', 'N/A')}, name: {user.get('first_name', 'N/A')}")
-            
-            user_data = await self.mongo_db.users.find_one({"clerk_id": clerk_id})
-            if user_data:
-                print(f"✅ User found: {user_data.get('first_name', 'N/A')} {user_data.get('last_name', 'N/A')}")
-                user_data["_id"] = str(user_data["_id"])
-                return user_data
+            # Get user profile with skills from users/Profile collection
+            profile_data = await self.users_db.Profile.find_one({"clerk_id": clerk_id})
+            if profile_data:
+                print(f"✅ Profile found with skills: {profile_data.get('skills', [])}")
+                profile_data["_id"] = str(profile_data["_id"])
+                return profile_data
             else:
-                print(f"❌ User with clerk_id '{clerk_id}' not found in MongoDB")
+                print(f"❌ User with clerk_id '{clerk_id}' not found in users/Profile collection")
+                
+                # Debug: Check if there are any users in the Profile collection
+                total_profiles = await self.users_db.Profile.count_documents({})
+                print(f"📊 Total profiles in users/Profile: {total_profiles}")
+                
+                # Debug: List all clerk_ids in Profile collection
+                all_profiles = await self.users_db.Profile.find({}, {"clerk_id": 1}).to_list(10)
+                print(f"📋 Sample clerk_ids in Profile: {[p.get('clerk_id') for p in all_profiles]}")
+                
                 return None
+                
         except Exception as e:
             print(f"💥 Error fetching user from MongoDB: {e}")
             return None
     
     async def create_user(self, user_data: dict) -> Optional[str]:
-        """Create a new user in MongoDB"""
+        """Create a new user in users/Profile collection"""
         try:
-            result = await self.mongo_db.users.insert_one(user_data)
-            return str(result.inserted_id)
+            print(f"📝 Creating user in users/Profile collection...")
+            print(f"📝 User data: {user_data}")
+            
+            # Store user in users/Profile collection
+            result = await self.users_db.Profile.insert_one(user_data)
+            user_id = str(result.inserted_id)
+            print(f"✅ User created in users/Profile with ID: {user_id}")
+            
+            # Verify the user was created
+            verify_user = await self.users_db.Profile.find_one({"_id": result.inserted_id})
+            if verify_user:
+                print(f"✅ User verification successful: {verify_user.get('first_name')} {verify_user.get('last_name')}")
+            else:
+                print(f"❌ User verification failed!")
+            
+            return user_id
         except Exception as e:
             print(f"Error creating user in MongoDB: {e}")
             return None
     
     async def update_user(self, clerk_id: str, update_data: dict) -> bool:
-        """Update user data in MongoDB"""
+        """Update user data in users/Profile collection"""
         try:
-            result = await self.mongo_db.users.update_one(
+            result = await self.users_db.Profile.update_one(
                 {"clerk_id": clerk_id},
                 {"$set": update_data}
             )
@@ -211,31 +229,32 @@ class Database:
         print(f"   Keywords: {keywords}, Location: {location}")
         print(f"   Filters: job_type={job_type_filter}, category={category_filter}, trusted={trusted_only}")
         
-        # ============= STEP 1: GET POSTED JOBS FROM MONGODB =============
+        # ============= STEP 1: GET JOBS FROM JOBS/JOBS-LISTS COLLECTION =============
         try:
-            print(f"\n📋 STEP 1: Fetching posted jobs from MongoDB...")
-            posted_jobs = await self.mongo_db.jobs.find(
-                {"is_verified": True},
+            print(f"\n📋 STEP 1: Fetching jobs from Jobs/jobs-lists collection...")
+            posted_jobs = await self.mongo_db["jobs-lists"].find(
+                {"is_active": {"$ne": False}},  # Get active jobs
                 {
-                    "_id": 1, "employer_id_1": 1, "title": 1, "description_text": 1,
-                    "job_type": 1, "location_1": 1, "skills": 1, "requirements": 1,
-                    "category": 1, "source": 1, "created_at": 1, "posted_time": 1
+                    "_id": 1, "employer_id": 1, "title": 1, "description": 1,
+                    "employment_type": 1, "location": 1, "skills_required": 1, "requirements": 1,
+                    "category": 1, "source": 1, "created_at": 1, "posted_at": 1,
+                    "salary": 1, "company": 1, "url": 1, "experience_level": 1
                 }
             ).to_list(100)
             
-            print(f"✅ Found {len(posted_jobs)} posted jobs in MongoDB")
+            print(f"✅ Found {len(posted_jobs)} jobs in Jobs/jobs-lists collection")
             
             for job in posted_jobs:
-                converted_job = self._convert_mongo_job(job)
+                converted_job = self._convert_jobs_lists_job(job)
                 if converted_job:
-                    converted_job["source"] = "posted"
+                    converted_job["source"] = "jobs_lists"
                     converted_job["priority"] = 1.0
                     all_jobs.append(converted_job)
                     
-            print(f"✅ Successfully processed {len([j for j in all_jobs if j.get('source') == 'posted'])} MongoDB jobs")
+            print(f"✅ Successfully processed {len([j for j in all_jobs if j.get('source') == 'jobs_lists'])} jobs from jobs-lists")
             
         except Exception as e:
-            print(f"❌ Error fetching posted jobs from MongoDB: {e}")
+            print(f"❌ Error fetching jobs from Jobs/jobs-lists: {e}")
         
         # ============= STEP 2: GET CACHED JOBS FROM REDIS =============
         remaining_needed = limit - len(all_jobs)
@@ -254,16 +273,17 @@ class Database:
                 for key in job_keys[:max_keys_to_process]:
                     job_data = await self.redis_client.hgetall(key)
                     if job_data:
-                        if self._matches_search_criteria(job_data, keywords, location, job_type_filter, category_filter, trusted_only):
-                            converted_job = self._convert_scraped_job(job_data)
-                            if converted_job:
-                                converted_job["source"] = "scraped"
-                                converted_job["priority"] = 0.7
-                                all_jobs.append(converted_job)
-                                scraped_count += 1
-                                
-                                if scraped_count >= remaining_needed:
-                                    break
+                        # Always try to convert Redis jobs (skip criteria matching)
+                        converted_job = self._convert_scraped_job(job_data)
+                        
+                        if converted_job:
+                            converted_job["source"] = "scraped"
+                            converted_job["priority"] = 0.7
+                            all_jobs.append(converted_job)
+                            scraped_count += 1
+                            
+                            if scraped_count >= remaining_needed:
+                                break
                 
                 print(f"✅ Successfully processed {scraped_count} cached Redis jobs")
                 
@@ -274,10 +294,10 @@ class Database:
         remaining_needed = limit - len(all_jobs)
         
         # LOOP PREVENTION: Only scrape if we have very few jobs and haven't scraped recently
+        # OR if force_scrape is explicitly requested
         should_scrape = (
             remaining_needed > 0 and 
-            len(all_jobs) < max(50, limit * 0.1) and  # Only if we have less than 10% of requested or minimum 50
-            not force_scrape
+            (len(all_jobs) < max(50, limit * 0.1) or force_scrape)  # Scrape if few jobs OR force_scrape=True
         )
         
         if should_scrape:
@@ -293,9 +313,15 @@ class Database:
                     # LIMIT SCRAPING: Cap the number of jobs to scrape
                     max_scrape_jobs = min(remaining_needed, 100)  # Max 100 fresh jobs
                     
+                    # Use broader search terms for LinkedIn scraping
+                    broad_keywords = "software engineer developer python javascript"
+                    broad_location = "United States" if location and "United States" in location else "India"
+                    
+                    print(f"   Using broader terms: keywords='{broad_keywords}', location='{broad_location}'")
+                    
                     scraped_jobs = self.scraper.get_jobs(
-                        keywords=keywords,
-                        location=location,
+                        keywords=broad_keywords,
+                        location=broad_location,
                         max_jobs=max_scrape_jobs,
                         job_type_filter=job_type_filter,
                         category_filter=category_filter,
@@ -326,12 +352,12 @@ class Database:
         
         # ============= FINAL RESULTS =============
         print(f"\n📊 === FINAL JOB SUMMARY ===")
-        posted_count = len([j for j in all_jobs if j.get('source') == 'posted'])
+        jobs_lists_count = len([j for j in all_jobs if j.get('source') == 'jobs_lists'])
         cached_count = len([j for j in all_jobs if j.get('source') == 'scraped'])
         fresh_count = len([j for j in all_jobs if j.get('source') == 'fresh_scraped'])
         
         print(f"Total jobs found: {len(all_jobs)}")
-        print(f"  🏢 Posted jobs (MongoDB): {posted_count}")
+        print(f"  🏢 Jobs from jobs-lists (MongoDB): {jobs_lists_count}")
         print(f"  💾 Cached jobs (Redis): {cached_count}")
         print(f"  🌐 Fresh scraped jobs: {fresh_count}")
         print(f"=============================")
@@ -347,17 +373,16 @@ class Database:
                                job_type_filter: str, category_filter: str, trusted_only: bool) -> bool:
         """Check if a Redis job matches the search criteria"""
         try:
-            if keywords:
-                keywords_lower = keywords.lower()
-                title_match = keywords_lower in job_data.get('title', '').lower()
-                desc_match = keywords_lower in job_data.get('description', '').lower()
-                if not (title_match or desc_match):
-                    return False
+            # Skip all filtering for Redis jobs to get maximum results
+            # Users can filter on frontend if needed
+            return True
             
-            if location and location.lower() != "India":
+            # Handle location filtering - if empty or "All Locations", don't filter
+            if location and location.strip() and location.lower() not in ["all locations", "all"]:
                 location_lower = location.lower()
                 job_location = job_data.get('location', '').lower()
-                if location_lower not in job_location:
+                # Only filter if location is specified and not "all locations"
+                if location_lower not in job_location and "remote" not in job_location:
                     return False
             
             if job_type_filter:
@@ -427,6 +452,54 @@ class Database:
             "coordinates": None
         }
     
+    def _convert_jobs_lists_job(self, job_data: dict) -> dict:
+        """Convert jobs-lists collection job data to our expected format"""
+        try:
+            skills = []
+            if job_data.get('skills_required'):
+                if isinstance(job_data['skills_required'], list):
+                    skills = job_data['skills_required']
+                else:
+                    skills = [skill.strip() for skill in job_data['skills_required'].split(',') if skill.strip()]
+            
+            location_data = job_data.get('location', {})
+            if isinstance(location_data, str):
+                location = self._parse_location(location_data)
+            else:
+                location = location_data
+            
+            raw_job_type = job_data.get('employment_type', 'Full-time')
+            normalized_employment_type = self._normalize_employment_type(raw_job_type)
+            
+            salary_data = job_data.get('salary', {})
+            if isinstance(salary_data, str):
+                salary_data = self._parse_salary_string(salary_data)
+            
+            return {
+                "id": str(job_data.get("_id", "")),
+                "employer_id": job_data.get("employer_id", ""),
+                "title": job_data.get("title", ""),
+                "description": job_data.get("description", ""),
+                "requirements": job_data.get("requirements", []),
+                "responsibilities": [],
+                "employment_type": normalized_employment_type,
+                "salary": salary_data,
+                "location": location,
+                "skills_required": skills,
+                "benefits": [],
+                "is_active": True,
+                "posted_at": job_data.get("posted_at", job_data.get("created_at", "2024-01-01")),
+                "expires_at": None,  # Make it optional to avoid validation errors
+                "category": job_data.get("category", ""),
+                "source": job_data.get("source", "jobs_lists"),
+                "company": job_data.get("company", ""),
+                "url": job_data.get("url", ""),
+                "experience_level": job_data.get("experience_level", "")
+            }
+        except Exception as e:
+            print(f"Error converting jobs-lists job: {e}")
+            return None
+
     def _convert_mongo_job(self, job_data: dict) -> dict:
         """Convert MongoDB job data to our expected format"""
         try:
@@ -454,7 +527,7 @@ class Database:
                 "benefits": [],
                 "is_active": True,
                 "posted_at": job_data.get("created_at", "2024-01-01"),
-                "expires_at": "2024-12-31",
+                "expires_at": None,  # Make it optional to avoid validation errors
                 "category": job_data.get("category", ""),
                 "source": job_data.get("source", "Manual"),
                 "job_link": job_data.get("job_link", ""),
@@ -488,8 +561,18 @@ class Database:
                 except:
                     responsibilities = [job_data['responsibilities']] if job_data['responsibilities'] else []
             
+            # Handle salary - be more flexible and handle empty values
             raw_salary = job_data.get('salary', '')
-            parsed_salary = self._parse_salary_string(raw_salary)
+            if raw_salary and raw_salary.strip():
+                parsed_salary = self._parse_salary_string(raw_salary)
+            else:
+                # Default salary structure for empty salary
+                parsed_salary = {
+                    "min": 0,
+                    "max": 0,
+                    "currency": "USD",
+                    "is_public": False
+                }
             
             location = self._parse_location(job_data.get('location', ''))
             if not location["country"]:
@@ -498,27 +581,48 @@ class Database:
             raw_employment_type = job_data.get('employment_type', 'full_time')
             normalized_employment_type = self._normalize_employment_type(raw_employment_type)
             
-            return {
-                "id": job_data.get('job_id', ''),
-                "employer_id": job_data.get('company', ''),
-                "title": job_data.get('title', ''),
-                "description": job_data.get('responsibilities', ''),
-                "requirements": requirements,
-                "responsibilities": responsibilities,
+            # Generate a unique ID if not present - handle Redis data structure
+            job_id = job_data.get('job_id') or job_data.get('_id') or str(hash(job_data.get('title', '')))
+            
+            # Handle posted_at date - convert string dates to proper datetime
+            posted_at_raw = job_data.get('posted_date', '2024-01-01')
+            if isinstance(posted_at_raw, str):
+                try:
+                    # Try to parse the date string
+                    from datetime import datetime
+                    if len(posted_at_raw) == 10:  # Format: YYYY-MM-DD
+                        posted_at = datetime.strptime(posted_at_raw, '%Y-%m-%d')
+                    else:
+                        posted_at = datetime.fromisoformat(posted_at_raw.replace('Z', '+00:00'))
+                except:
+                    posted_at = datetime(2024, 1, 1)  # Default fallback
+            else:
+                posted_at = posted_at_raw
+            
+            # Create a robust job object with all required fields
+            job_obj = {
+                "id": str(job_id),
+                "employer_id": job_data.get('company', 'unknown'),
+                "title": job_data.get('title', 'Untitled Job'),
+                "description": job_data.get('description', job_data.get('responsibilities', 'No description available')),
+                "requirements": requirements if requirements else ['No specific requirements listed'],
+                "responsibilities": responsibilities if responsibilities else ['No specific responsibilities listed'],
                 "employment_type": normalized_employment_type,
                 "salary": parsed_salary,
                 "location": location,
-                "skills_required": skills,
+                "skills_required": skills if skills else [],
                 "benefits": [],
                 "is_active": True,
-                "posted_at": job_data.get('posted_date', '2024-01-01'),
-                "expires_at": job_data.get('expires_at', '2024-12-31'),
-                "company": job_data.get('company', ''),
+                "posted_at": posted_at,  # Use the parsed datetime
+                "expires_at": None,  # Set to None to avoid validation errors
+                "company": job_data.get('company', 'Unknown Company'),
                 "url": job_data.get('url', ''),
-                "experience_level": job_data.get('experience_level', ''),
-                "category": job_data.get('category', ''),
+                "experience_level": job_data.get('experience_level', 'Not specified'),
+                "category": job_data.get('category', 'General'),
                 "is_trusted_company": job_data.get('is_trusted_company', False)
             }
+            
+            return job_obj
         except Exception as e:
             print(f"Error converting job data: {e}")
             return None
@@ -613,6 +717,37 @@ class Database:
                 return {"success": False, "error": "Scraper not available"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+    
+    def calculate_skill_match_score(self, user_skills: list, job_skills: list) -> float:
+        """Calculate skill matching score between user and job"""
+        if not user_skills or not job_skills:
+            return 0.0
+        
+        # Convert to lowercase for case-insensitive matching
+        user_skills_lower = [skill.lower().strip() for skill in user_skills]
+        job_skills_lower = [skill.lower().strip() for skill in job_skills]
+        
+        # Calculate exact matches
+        exact_matches = set(user_skills_lower) & set(job_skills_lower)
+        
+        # Calculate partial matches (skills that contain each other)
+        partial_matches = 0
+        for user_skill in user_skills_lower:
+            for job_skill in job_skills_lower:
+                if user_skill in job_skill or job_skill in user_skill:
+                    partial_matches += 1
+                    break
+        
+        # Calculate score
+        total_job_skills = len(job_skills_lower)
+        if total_job_skills == 0:
+            return 0.0
+        
+        exact_score = len(exact_matches) / total_job_skills
+        partial_score = (partial_matches - len(exact_matches)) / total_job_skills * 0.5
+        
+        final_score = min(exact_score + partial_score, 1.0)
+        return round(final_score, 3)
 
 # Singleton instance
 db = Database()

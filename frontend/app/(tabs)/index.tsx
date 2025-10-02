@@ -1,7 +1,7 @@
 import { useAuth, useUser } from "@clerk/clerk-expo";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
-import { API_BASE_URL } from "../utils/api";
+import { API_BASE_URL, api } from "../utils/api";
 import * as Location from "expo-location";
 import React, { useEffect, useState } from "react";
 import { useSavedJobs } from "../contexts/SavedJobsContext";
@@ -158,58 +158,70 @@ export default function SeekerJobs() {
 
   useEffect(() => {
     // API_BASE_URL imported at top
-    if (!isSignedIn || !user) return;
+    if (!isSignedIn || !user) {
+      console.log('🔍 User not authenticated, trying sample user...');
+      // Try with sample user for development
+      fetchJobs('sample_user_123');
+      return;
+    }
+    
     const clerkId = user.id;
     const email =
       user.primaryEmailAddress?.emailAddress ||
       user.emailAddresses?.[0]?.emailAddress ||
       "";
 
+    console.log('🔍 User authentication check:');
+    console.log('  isSignedIn:', isSignedIn);
+    console.log('  user:', user?.id);
+    console.log('  clerkId:', clerkId);
+    console.log('  email:', email);
+
     const checkAndCreateUserAndFetchJobs = async () => {
       try {
         // Try to GET recommendations (also validates user existence in backend flow)
-        const getRes = await fetch(`${API_BASE_URL}/api/recommend/${clerkId}`);
-        if (getRes.ok) {
+        try {
+          await api.getRecommendations(clerkId, 1);
           // User exists, fetch jobs
           await fetchJobs(clerkId);
           return;
-        } else if (getRes.status === 404) {
-          // Not found, create
-          const payload = {
-            clerk_id: clerkId,
-            email,
-            first_name: user.firstName || "",
-            last_name: user.lastName || "",
-            role: "job_seeker",
-            skills: [],
-            location: "",
-            company_name: "",
-          };
-          const postRes = await fetch(
-            `${API_BASE_URL}/api/recommend/create-user`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload),
+        } catch (error: any) {
+          console.log('🔍 Error details:', error.message);
+          if (error.message.includes('404') || error.message.includes('not found')) {
+            console.log('👤 User not found, creating new user...');
+            // User not found, create them
+            const payload = {
+              clerk_id: clerkId,
+              email,
+              first_name: user.firstName || "",
+              last_name: user.lastName || "",
+              role: "job_seeker",
+              skills: [],
+              location: "",
+              company_name: "",
+            };
+            
+            console.log('📝 Creating user with payload:', payload);
+            try {
+              const createResult = await api.createUser(payload);
+              console.log('✅ User creation result:', createResult);
+              // User created, fetch jobs
+              await fetchJobs(clerkId);
+            } catch (createError: any) {
+              console.error('❌ User creation failed:', createError);
+              setError(`Failed to create user: ${createError.message}`);
             }
-          );
-          if (postRes.ok) {
-            // User created, fetch jobs
-            await fetchJobs(clerkId);
           } else {
-            setError("Error creating user. Please try again.");
+            console.error('❌ Unexpected error:', error);
+            setError("Error fetching user. Please try again.");
           }
-        } else {
-          setError("Error fetching user. Please try again.");
         }
       } catch (err) {
         // Fallback for dev when Clerk is not signed in: try sample user
         try {
-          const sample = await fetch(`${API_BASE_URL}/api/recommend/create-sample-user`, { method: 'POST' });
-          if (sample.ok) {
-            await fetchJobs('sample_user_123');
-            return;
-          }
+          await api.createSampleUser();
+          await fetchJobs('sample_user_123');
+          return;
         } catch {}
         setError("Could not reach backend. Ensure API URL is reachable.");
       }
@@ -369,15 +381,9 @@ export default function SeekerJobs() {
     try {
       setIsLoading(true);
       setError(null);
-      // API_BASE_URL imported at top
-      const res = await fetch(`${API_BASE_URL}/api/recommend/${clerkId}`);
-      if (!res.ok) {
-        setError("Failed to fetch jobs from backend.");
-        setJobs([]);
-        setAllJobs([]);
-        return;
-      }
-      const jobsData = await res.json();
+      
+      // Use the new API utility function
+      const jobsData = await api.getRecommendations(clerkId, 20);
       // jobsData: [{ job: {...}, match_score: ... }, ...]
       const mappedJobs: Job[] = jobsData.map((item: any) => {
         const job = item.job ? item.job : item;
@@ -610,11 +616,21 @@ export default function SeekerJobs() {
     }
   };
 
-  const handleSwipeLeft = (job: Job) => {
+  const handleSwipeLeft = async (job: Job) => {
     if (isAnimating || swipeLimit <= 0) return;
     setIsAnimating(true);
     updateSwipeLimit();
     triggerHalfScreenAnimation("left");
+    
+    // Send swipe action to backend
+    try {
+      if (user?.id) {
+        await api.handleSwipeAction(user.id, job.id, 'dislike');
+      }
+    } catch (error) {
+      console.error('Failed to send swipe action to backend:', error);
+    }
+    
     setTimeout(() => {
       setJobs((prev) => prev.slice(1));
       setSwipedJobs((prev) => [...prev, { job, action: "rejected" }]);
@@ -624,11 +640,21 @@ export default function SeekerJobs() {
       setIsAnimating(false);
     }, 300);
   };
-    const handleSwipeRight = (job:Job) =>{
-      if(isAnimating || swipeLimit <= 0) return;
+  const handleSwipeRight = async (job: Job) => {
+    if (isAnimating || swipeLimit <= 0) return;
     setIsAnimating(true);
     updateSwipeLimit();
     triggerHalfScreenAnimation("right");
+    
+    // Send swipe action to backend
+    try {
+      if (user?.id) {
+        await api.handleSwipeAction(user.id, job.id, 'like');
+      }
+    } catch (error) {
+      console.error('Failed to send swipe action to backend:', error);
+    }
+    
     setTimeout(() => {
       setJobs((prev) => prev.slice(1));
       setSwipedJobs((prev) => [...prev, { job, action: "liked" }]);
@@ -656,7 +682,7 @@ export default function SeekerJobs() {
     }, 300);
   };
 
-  const handleBookmark = (job: Job) => {
+  const handleBookmark = async (job: Job) => {
     if (isJobSaved(job.id)) {
       removeJob(job.id);
       Alert.alert(
@@ -665,6 +691,16 @@ export default function SeekerJobs() {
       );
     } else {
       addJob(job);
+      
+      // Send save action to backend
+      try {
+        if (user?.id) {
+          await api.handleSwipeAction(user.id, job.id, 'save');
+        }
+      } catch (error) {
+        console.error('Failed to send save action to backend:', error);
+      }
+      
       Alert.alert(
         "Bookmarked! 🔖",
         ` ${job.title} has been saved to your bookmarks.`

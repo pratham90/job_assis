@@ -8,6 +8,7 @@ from app.models.swipe import UserSwipe, SwipeType
 from typing import List
 from pydantic import BaseModel
 from datetime import datetime
+import json
 
 from app.utils.converter import convert_mongo_doc
 
@@ -86,7 +87,7 @@ async def list_users():
     """List all users in the system (for debugging)"""
     try:
         print(f"\n📋 === LISTING ALL USERS ===")
-        users = await db.mongo_db.users.find({}, {
+        users = await db.users_db.Profile.find({}, {
             "clerk_id": 1, 
             "email": 1, 
             "first_name": 1, 
@@ -156,12 +157,14 @@ async def create_sample_user():
 async def get_recommendations(
     clerk_id: str,
     limit: int = 10,
+    location: str = "All Locations",  # Default to "All Locations"
     recommender: HybridRecommender = Depends(get_recommender),
 ):
     try:
         print(f"\n🚀 === RECOMMENDATION REQUEST ===")
         print(f"User ID: {clerk_id}")
         print(f"Requested limit: {limit}")
+        print(f"Timestamp: {datetime.utcnow().isoformat()}")
         
         # 1. Fetch user data
         print(f"📋 Fetching user profile from MongoDB...")
@@ -175,14 +178,40 @@ async def get_recommendations(
         print(f"   Skills: {user.get('skills', [])}")
         print(f"   Location: {user.get('location', 'N/A')}")
 
-        # 2. Convert user document
-        user_converted = convert_mongo_doc(user)
-        user_model = UserProfile(**user_converted)
+        # 2. Use raw user data instead of strict Pydantic validation
+        # This allows us to work with the actual MongoDB document structure
+        print(f"📊 Using raw user data for recommendations...")
+        print(f"📊 User data keys: {list(user.keys())}")
+        
+        # Create a simple user object with the data we need
+        class SimpleUser:
+            def __init__(self, data):
+                self.clerk_id = data.get('clerk_id', '')
+                self.email = data.get('email', '')
+                self.first_name = data.get('first_name', '')
+                self.last_name = data.get('last_name', '')
+                self.location = data.get('location', '')
+                self.skills = data.get('skills', [])
+                self.technical_skills = data.get('technical_skills', [])
+                self.soft_skills = data.get('soft_skills', [])
+                self.certifications = data.get('certifications', [])
+                self.experience = data.get('experience', [])
+                self.education = data.get('education', [])
+                self.projects = data.get('projects', [])
+                self.resume = data.get('resume', {})
+        
+        try:
+            user_model = SimpleUser(user)
+            print(f"✅ SimpleUser created successfully")
+        except Exception as e:
+            print(f"💥 Error creating SimpleUser: {e}")
+            raise HTTPException(status_code=500, detail=f"User processing failed: {str(e)}")
 
-        # 3. Build search params from user resume/skills and fetch up to 100 jobs
+        # 3. Build search params from user skills and fetch up to 100 jobs
         keywords_parts = []
         if user.get("skills"):
             keywords_parts.extend(user.get("skills")[:5])
+        
         # Pull common resume keywords if available
         try:
             if user.get("resume") and isinstance(user["resume"].get("parsed_data"), dict):
@@ -199,7 +228,16 @@ async def get_recommendations(
             pass
 
         derived_keywords = " ".join(dict.fromkeys([kp for kp in keywords_parts if isinstance(kp, str)])) or "software engineer"
-        derived_location = user.get("location") or "India"
+        
+        # Use frontend location filter, don't filter by location if "All Locations"
+        if location and location.lower() not in ["all locations", "all", ""]:
+            derived_location = location
+        else:
+            derived_location = ""  # Empty means no location filtering
+        
+        print(f"🔍 Searching with keywords: {derived_keywords}")
+        print(f"📍 Location filter: {location}")
+        print(f"📍 Final location: {derived_location}")
 
         jobs = await db.get_active_jobs(limit=100, keywords=derived_keywords, location=derived_location)
         if not jobs:
@@ -218,32 +256,108 @@ async def get_recommendations(
             # Return empty list so UI can handle gracefully
             return []
 
-        # 4. Convert job documents
+        # 4. Convert job documents (jobs from get_active_jobs are already converted)
         job_models = []
         for job in jobs:
             try:
-                converted = convert_mongo_doc(job)
-                job_models.append(JobPosting(**converted))
+                # If job is already a dict (from get_active_jobs), use it directly
+                if isinstance(job, dict):
+                    job_data = job
+                else:
+                    # If it's a MongoDB document, convert it
+                    job_data = convert_mongo_doc(job)
+                
+                job_model = JobPosting(**job_data)
+                job_models.append(job_model)
             except Exception as e:
-                print(f"Skipping invalid job {job.get('_id')}: {str(e)}")
+                print(f"❌ Skipping invalid job: {str(e)}")
                 continue
 
-        # 5. Fetch user swipes
+        # 5. Fetch user swipes (use raw data)
         swipes = await db.get_user_swipes(clerk_id)
-        swipe_models = [UserSwipe(**convert_mongo_doc(swipe)) for swipe in swipes]
+        
+        # 6. Filter out jobs that user has already liked/disliked
+        liked_job_ids = set()
+        disliked_job_ids = set()
+        
+        for swipe in swipes:
+            job_id = swipe.get('job_id')
+            action = swipe.get('action')
+            if job_id:
+                if action in ['like', 'super_like', 'save']:
+                    liked_job_ids.add(job_id)
+                elif action == 'dislike':
+                    disliked_job_ids.add(job_id)
+        
+        print(f"🚫 Filtering out {len(liked_job_ids)} liked jobs and {len(disliked_job_ids)} disliked jobs")
+        
+        # Filter job models to exclude liked/disliked jobs
+        filtered_job_models = []
+        for job_model in job_models:
+            if job_model.id not in liked_job_ids and job_model.id not in disliked_job_ids:
+                filtered_job_models.append(job_model)
+        
+        print(f"📊 After filtering: {len(filtered_job_models)} jobs available for recommendations")
+        
+        # 7. If we don't have enough jobs, try to get more from Redis/LinkedIn
+        if len(filtered_job_models) < limit:
+            print(f"⚠️  Only {len(filtered_job_models)} jobs available, need {limit}")
+            print(f"🔄 Attempting to fetch more jobs from Redis/LinkedIn...")
+            
+            # Try to get more jobs with relaxed criteria
+            try:
+                additional_jobs = await db.get_active_jobs(
+                    limit=limit * 2,  # Get more jobs
+                    keywords="",  # No keyword filtering
+                    location="",  # No location filtering
+                    job_type_filter=None,
+                    category_filter=None,
+                    trusted_only=False,  # Include all companies
+                    force_scrape=True  # Force LinkedIn scraping
+                )
+                
+                print(f"📊 Additional jobs fetched: {len(additional_jobs)}")
+                
+                # Process additional jobs (already converted by get_active_jobs)
+                for job in additional_jobs:
+                    try:
+                        # Jobs from get_active_jobs are already converted
+                        if isinstance(job, dict):
+                            job_data = job
+                        else:
+                            job_data = convert_mongo_doc(job)
+                        
+                        job_model = JobPosting(**job_data)
+                        
+                        # Only add if not already liked/disliked AND not already in filtered_job_models
+                        if (job_model.id not in liked_job_ids and 
+                            job_model.id not in disliked_job_ids and
+                            job_model.id not in [j.id for j in filtered_job_models]):
+                            filtered_job_models.append(job_model)
+                            
+                            if len(filtered_job_models) >= limit:
+                                break
+                    except Exception as e:
+                        continue
+                        
+            except Exception as e:
+                print(f"❌ Error fetching additional jobs: {e}")
+        
+        print(f"📊 Final job count: {len(filtered_job_models)} jobs")
 
-        # 6. Generate recommendations
+        # 7. Generate recommendations
         print(f"🤖 Generating recommendations using AI...")
         recommendations = await recommender.recommend(
-            user_model, job_models, swipe_models
+            user_model, filtered_job_models, swipes
         )
         
         print(f"\n🎯 === TOP RECOMMENDATIONS ===")
         for i, (job, score) in enumerate(recommendations[:limit]):
             print(f"\n--- Recommendation {i+1} ---")
             print(f"Job Title: {job.title}")
-            print(f"Company: {getattr(job, 'employer_id', 'N/A')}")
+            print(f"Company: {getattr(job, 'company', getattr(job, 'employer_id', 'N/A'))}")
             print(f"Location: {job.location.city if job.location else 'N/A'}")
+            print(f"Skills Required: {getattr(job, 'skills_required', [])}")
             print(f"Match Score: {score:.3f}")
             print(f"Source: {getattr(job, 'source', 'unknown')}")
             print(f"Priority: {getattr(job, 'priority', 'N/A')}")
@@ -286,3 +400,45 @@ async def get_recommendations(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Recommendation failed: {str(e)}")
+
+@router.post("/swipe")
+async def handle_swipe_action(request: SwipeRequest):
+    """Handle user swipe actions (like, dislike, save)"""
+    try:
+        print(f"\n👆 === SWIPE ACTION ===")
+        print(f"User ID: {request.user_id}")
+        print(f"Job ID: {request.job_id}")
+        print(f"Action: {request.action}")
+        
+        # Validate action
+        valid_actions = ['like', 'dislike', 'save', 'apply', 'super_like']
+        if request.action not in valid_actions:
+            raise HTTPException(status_code=400, detail=f"Invalid action. Must be one of: {valid_actions}")
+        
+        # Store swipe action in Redis
+        swipe_data = {
+            "user_id": request.user_id,
+            "job_id": request.job_id,
+            "action": request.action,
+            "timestamp": datetime.utcnow().isoformat(),
+            "undone": False
+        }
+        
+        # Store in Redis with expiration (30 days)
+        swipe_key = f"swipe:{request.user_id}:{request.job_id}:{request.action}"
+        await db.redis_client.setex(swipe_key, 30 * 24 * 60 * 60, json.dumps(swipe_data))
+        
+        print(f"✅ Swipe action stored successfully")
+        
+        return {
+            "success": True,
+            "message": f"Job {request.action} successfully",
+            "action": request.action,
+            "job_id": request.job_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"💥 Error handling swipe action: {e}")
+        raise HTTPException(status_code=500, detail=f"Swipe action failed: {str(e)}")

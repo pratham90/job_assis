@@ -2,8 +2,14 @@ from fastapi import FastAPI
 from app.routers import recommendations
 from app.core.db import db
 from fastapi.middleware.cors import CORSMiddleware
+import logging
 
-app = FastAPI()
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Job Recommender API", version="1.0.0")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -12,6 +18,13 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
+# Add startup event
+@app.on_event("startup")
+async def startup_event():
+    logger.info("🚀 Starting Job Recommender API...")
+    logger.info("📊 Database connections initialized")
+    logger.info("🔗 API endpoints registered")
+
 @app.get("/")
 async def root():
     return {"message": "Welcome to the Job Recommender API"}
@@ -19,6 +32,30 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+@app.get("/debug")
+async def debug_info():
+    """Debug endpoint to check API status and database connections"""
+    try:
+        # Test database connections
+        mongo_status = "connected" if db.mongo_client else "disconnected"
+        redis_status = "connected" if db.redis_client else "disconnected"
+        
+        return {
+            "api_status": "running",
+            "mongodb_status": mongo_status,
+            "redis_status": redis_status,
+            "endpoints": [
+                "/",
+                "/health", 
+                "/debug",
+                "/api/recommend/{clerk_id}",
+                "/api/recommend/create-user",
+                "/api/recommend/swipe"
+            ]
+        }
+    except Exception as e:
+        return {"error": str(e), "api_status": "error"}
 
 app.include_router(
     recommendations.router,
