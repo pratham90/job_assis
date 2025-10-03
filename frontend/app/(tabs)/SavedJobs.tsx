@@ -31,13 +31,14 @@ export interface Location {
 
 export interface Job {
   _id: string;
+  id?: string;
   title: string;
   description: string;
   requirements: string[];
   responsibilities: string[];
   employment_type: "full_time" | "part_time" | "contract" | "internship";
   salary: SalaryRange;
-  location: Location;
+  location?: Location | string;
   skills_required: string[];
   benefits: string[];
   is_active: boolean;
@@ -124,17 +125,24 @@ const SavedJobs = () => {
   };
 
   const formatSalary = (salary: SalaryRange) => {
-    return `$${salary.min/1000}k - $${salary.max/1000}k`;
+    if (!salary) return 'Salary not specified';
+    const sMin = typeof salary.min === 'number' ? salary.min : Number(salary.min);
+    const sMax = typeof salary.max === 'number' ? salary.max : Number(salary.max);
+    if (!isNaN(sMin) && !isNaN(sMax)) return `$${sMin/1000}k - $${sMax/1000}k`;
+    if (!isNaN(sMin)) return `$${sMin/1000}k`;
+    return 'Salary not specified';
   };
 
-  const formatLocation = (location: Location) => {
+  const formatLocation = (location?: Location | string) => {
+    if (!location) return "Location not specified";
+    if (typeof location === 'string') return location;
     if (location.remote) return "Remote";
     return location.state ? `${location.city}, ${location.state}` : location.city;
   };
 
   const renderJobCard = (job: Job) => (
     <TouchableOpacity
-      key={job._id}
+      key={job.id || job._id}
       style={styles.jobCard}
       onPress={() => handleJobPress(job)}
       activeOpacity={0.7}
@@ -163,7 +171,7 @@ const SavedJobs = () => {
           </View>
           <TouchableOpacity
             style={styles.unsaveButton}
-            onPress={() => handleUnsaveJob(job._id)}
+          onPress={() => handleUnsaveJob(job.id || job._id)}
           >
             <Ionicons name="bookmark" size={20} color="#ef4444" />
           </TouchableOpacity>
@@ -175,13 +183,16 @@ const SavedJobs = () => {
       </Text>
       
       <View style={styles.tags}>
-        {(job.tags || job.skills_required).slice(0, 3).map((tag, index) => (
+        {(Array.isArray(job.tags ? job.tags : job.skills_required ? job.skills_required : [])
+          ? (job.tags || job.skills_required || [])
+          : []
+        ).slice(0, 3).map((tag, index) => (
           <View key={index} style={styles.tag}>
             <Text style={styles.tagText}>{tag}</Text>
           </View>
         ))}
-        {(job.tags || job.skills_required).length > 3 && (
-          <Text style={styles.moreTagsText}>+{(job.tags || job.skills_required).length - 3} more</Text>
+        {((job.tags || job.skills_required || []).length > 3) && (
+          <Text style={styles.moreTagsText}>+{(job.tags || job.skills_required || []).length - 3} more</Text>
         )}
       </View>
     </TouchableOpacity>
@@ -252,7 +263,7 @@ const SavedJobs = () => {
             {/* Requirements */}
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Requirements</Text>
-              {selectedJob.requirements.map((req, index) => (
+              {(selectedJob.requirements || []).map((req, index) => (
                 <View key={index} style={styles.listItem}>
                   <Text style={styles.bulletPoint}>•</Text>
                   <Text style={styles.listText}>{req}</Text>
@@ -263,7 +274,7 @@ const SavedJobs = () => {
             {/* Benefits */}
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Benefits</Text>
-              {selectedJob.benefits.map((benefit, index) => (
+              {(selectedJob.benefits || []).map((benefit, index) => (
                 <View key={index} style={styles.listItem}>
                   <Text style={styles.bulletPoint}>•</Text>
                   <Text style={styles.listText}>{benefit}</Text>
@@ -275,7 +286,7 @@ const SavedJobs = () => {
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Required Skills</Text>
               <View style={styles.skillTags}>
-                {(selectedJob.tags || selectedJob.skills_required).map((tag, index) => (
+                {((selectedJob.tags || selectedJob.skills_required) || []).map((tag, index) => (
                   <View key={index} style={styles.skillTag}>
                     <Text style={styles.skillTagText}>{tag}</Text>
                   </View>

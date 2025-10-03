@@ -18,6 +18,7 @@ class SwipeRequest(BaseModel):
     user_id: str
     job_id: str
     action: str  # 'like', 'dislike', 'save', 'apply', 'super_like'
+    job_payload: dict | None = None  # optional snapshot to persist
 
 class CreateUserRequest(BaseModel):
     clerk_id: str
@@ -256,7 +257,7 @@ async def get_recommendations(
             # Return empty list so UI can handle gracefully
             return []
 
-        # 4. Convert job documents (jobs from get_active_jobs are already converted)
+        # 4. Convert job documents (jobs from get_active_jobs are already converted) and apply location filter
         job_models = []
         for job in jobs:
             try:
@@ -266,17 +267,28 @@ async def get_recommendations(
                 else:
                     # If it's a MongoDB document, convert it
                     job_data = convert_mongo_doc(job)
-                
+                # Apply location filter if provided and not 'All Locations'
+                if location and location != "All Locations":
+                    loc_ok = False
+                    if isinstance(job_data.get('location'), str):
+                        loc_ok = location.lower() in job_data['location'].lower()
+                    elif isinstance(job_data.get('location'), dict):
+                        parts = [str(job_data['location'].get('city','')), str(job_data['location'].get('state','')), str(job_data['location'].get('country',''))]
+                        loc_ok = location.lower() in (' '.join(parts)).lower()
+                    if not loc_ok:
+                        continue
+
                 job_model = JobPosting(**job_data)
                 job_models.append(job_model)
             except Exception as e:
                 print(f"❌ Skipping invalid job: {str(e)}")
                 continue
 
-        # 5. Fetch user swipes (use raw data)
+        # 5. Fetch user swipes from Redis and persisted actions from MongoDB
         swipes = await db.get_user_swipes(clerk_id)
-        
-        # 6. Filter out jobs that user has already liked/disliked
+        mongo_action_ids = await db.get_user_action_job_ids(clerk_id, ['save', 'like', 'super_like', 'dislike'])
+
+        # 6. Filter out jobs that user has already liked/saved/disliked
         liked_job_ids = set()
         disliked_job_ids = set()
         
@@ -288,10 +300,14 @@ async def get_recommendations(
                     liked_job_ids.add(job_id)
                 elif action == 'dislike':
                     disliked_job_ids.add(job_id)
+
+        # Also include MongoDB persisted actions to ensure no duplicates show up
+        for jid in mongo_action_ids:
+            liked_job_ids.add(jid)
         
         print(f"🚫 Filtering out {len(liked_job_ids)} liked jobs and {len(disliked_job_ids)} disliked jobs")
         
-        # Filter job models to exclude liked/disliked jobs
+        # Filter job models to exclude liked/saved/disliked jobs
         filtered_job_models = []
         for job_model in job_models:
             if job_model.id not in liked_job_ids and job_model.id not in disliked_job_ids:
@@ -429,7 +445,20 @@ async def handle_swipe_action(request: SwipeRequest):
         await db.redis_client.setex(swipe_key, 30 * 24 * 60 * 60, json.dumps(swipe_data))
         
         print(f"✅ Swipe action stored successfully")
-        
+
+        # Also persist 'save' and 'like' to MongoDB for long-term storage
+        if request.action in ["save", "like", "super_like"]:
+            # Try to attach job snapshot for rich Saved view
+            job_snapshot = None
+            try:
+                if request.job_payload:
+                    job_snapshot = request.job_payload
+                else:
+                    job_snapshot = await db.get_job_by_id(request.job_id)
+            except Exception:
+                job_snapshot = None
+            await db.save_user_job_action(request.user_id, request.job_id, request.action, job_snapshot)
+
         return {
             "success": True,
             "message": f"Job {request.action} successfully",
@@ -442,3 +471,24 @@ async def handle_swipe_action(request: SwipeRequest):
     except Exception as e:
         print(f"💥 Error handling swipe action: {e}")
         raise HTTPException(status_code=500, detail=f"Swipe action failed: {str(e)}")
+
+@router.get("/saved/{clerk_id}")
+async def get_saved_jobs(clerk_id: str):
+    """Return the user's saved jobs from MongoDB."""
+    try:
+        jobs = await db.get_user_saved_jobs(clerk_id)
+        return jobs
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch saved jobs: {str(e)}")
+
+class RemoveSavedRequest(BaseModel):
+    user_id: str
+    job_id: str
+
+@router.post("/saved/remove")
+async def remove_saved_job(req: RemoveSavedRequest):
+    try:
+        ok = await db.remove_saved_job(req.user_id, req.job_id)
+        return {"success": ok}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to remove saved job: {str(e)}")

@@ -669,11 +669,18 @@ class Database:
                 except Exception:
                     continue
             to_push = []
+            def _to_json_safe(d: dict) -> dict:
+                def convert(obj):
+                    if isinstance(obj, datetime):
+                        return obj.isoformat()
+                    return obj
+                return {k: convert(v) for k, v in d.items()}
+
             for job in jobs:
                 jid = str(job.get("_id") or job.get("id") or "")
                 if not jid or jid in existing_ids:
                     continue
-                to_push.append(json.dumps(job))
+                to_push.append(json.dumps(_to_json_safe(job)))
             enqueued = 0
             if to_push:
                 # Push to the right to preserve order
@@ -717,6 +724,79 @@ class Database:
                 return {"success": False, "error": "Scraper not available"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    # ===== Saved/Liked jobs persistence in MongoDB =====
+    async def save_user_job_action(self, user_id: str, job_id: str, action: str, job_snapshot: Optional[dict] = None) -> bool:
+        """Persist a user's job action (e.g., save/like) to MongoDB.
+
+        Collection: users.user_job_actions
+        Unique per (user_id, job_id, action)
+        """
+        try:
+            collection = self.users_db.user_job_actions
+            now = datetime.utcnow()
+            update_doc = {"$set": {"user_id": user_id, "job_id": job_id, "action": action, "updated_at": now},
+                          "$setOnInsert": {"created_at": now}}
+            if job_snapshot:
+                update_doc["$set"]["job_snapshot"] = job_snapshot
+            await collection.update_one(
+                {"user_id": user_id, "job_id": job_id, "action": action},
+                update_doc,
+                upsert=True,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save user job action: {e}")
+            return False
+
+    async def remove_saved_job(self, user_id: str, job_id: str) -> bool:
+        """Remove a saved job document for a user."""
+        try:
+            result = await self.users_db.user_job_actions.delete_one(
+                {"user_id": user_id, "job_id": job_id, "action": "save"}
+            )
+            return result.deleted_count > 0
+        except Exception as e:
+            logger.error(f"Failed to remove saved job: {e}")
+            return False
+
+    async def get_user_saved_jobs(self, user_id: str) -> List[dict]:
+        """Return saved jobs with enriched job data when available."""
+        try:
+            cursor = self.users_db.user_job_actions.find({"user_id": user_id, "action": "save"})
+            items = [doc async for doc in cursor]
+            results: List[dict] = []
+            for doc in items:
+                jid = str(doc.get("job_id"))
+                job_data = await self.get_job_by_id(jid)
+                if job_data:
+                    # Normalize to JobPosting fields expected by frontend
+                    job_obj = self._convert_job_data(job_data)
+                    if job_obj:
+                        results.append(job_obj)
+                else:
+                    # Fallback to stored snapshot
+                    snapshot = doc.get("job_snapshot") or {}
+                    snapshot_id = snapshot.get("id") or snapshot.get("_id") or jid
+                    results.append({"id": str(snapshot_id), **snapshot})
+            return results
+        except Exception as e:
+            logger.error(f"Failed to fetch saved jobs: {e}")
+            return []
+
+    async def get_user_action_job_ids(self, user_id: str, actions: List[str]) -> List[str]:
+        """Fetch job ids from MongoDB where user performed any of the given actions."""
+        try:
+            cursor = self.users_db.user_job_actions.find({"user_id": user_id, "action": {"$in": actions}})
+            ids: List[str] = []
+            async for doc in cursor:
+                jid = str(doc.get("job_id"))
+                if jid:
+                    ids.append(jid)
+            return ids
+        except Exception as e:
+            logger.error(f"Failed to fetch user action job ids: {e}")
+            return []
     
     def calculate_skill_match_score(self, user_skills: list, job_skills: list) -> float:
         """Calculate skill matching score between user and job"""

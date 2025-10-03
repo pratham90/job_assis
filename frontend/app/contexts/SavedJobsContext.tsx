@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from "react";
-import { saveJob, getSavedJobs, removeSavedJob } from "../utils/savedJobsStorage";
+// Moving away from local storage to backend persistence
+import { api } from "../utils/api";
 import { useUser } from "@clerk/clerk-expo";
 
 // Job type for context (should match your Job type in index.tsx)
@@ -40,54 +41,62 @@ export const SavedJobsProvider = ({ children }: { children: ReactNode }) => {
     return user.id || user.primaryEmailAddress?.emailAddress || user.emailAddresses?.[0]?.emailAddress || "default";
   };
 
-  // Load saved jobs for current user on mount and when user changes
+  // Load saved jobs for current user from backend on mount and when user changes
   useEffect(() => {
     (async () => {
-      const allJobs = await getSavedJobs();
       const userKey = getUserKey();
-      // Only show jobs for current user
-      const jobs = allJobs.filter((j: any) => j.userKey === userKey);
-      setSavedJobs(jobs);
+      if (userKey && userKey !== "default") {
+        try {
+          const jobs = await api.getSavedJobs(userKey);
+          setSavedJobs(jobs || []);
+        } catch (e) {
+          console.warn("Failed to load saved jobs:", e);
+          setSavedJobs([]);
+        }
+      } else {
+        setSavedJobs([]);
+      }
     })();
   }, [user]);
 
   const addJob = async (job: Job) => {
     const userKey = getUserKey();
-    // Avoid duplicates for this user
-    const allJobs = await getSavedJobs();
-    const exists = allJobs.some((j: any) => j.id === job.id && j.userKey === userKey);
-    if (!exists) {
-      await saveJob({ ...job, userKey });
+    try {
+      await api.handleSwipeAction(userKey, job.id, 'save');
+      const jobs = await api.getSavedJobs(userKey);
+      setSavedJobs(jobs || []);
+    } catch (e) {
+      console.warn('Failed to save job:', e);
     }
-    // Refresh jobs for this user
-    const jobs = (await getSavedJobs()).filter((j: any) => j.userKey === userKey);
-    setSavedJobs(jobs);
   };
 
   const removeJob = async (jobId: string) => {
     const userKey = getUserKey();
-    // Remove only for this user
-    const allJobs = await getSavedJobs();
-    const updatedJobs = allJobs.filter((j: any) => !(j.id === jobId && j.userKey === userKey));
-    // Save updated jobs
-    if (typeof window !== 'undefined' && window.localStorage) {
-      window.localStorage.setItem('saved_jobs', JSON.stringify(updatedJobs));
-    } else {
-      const AsyncStorage = (await import('@react-native-async-storage/async-storage')).default;
-      await AsyncStorage.setItem('saved_jobs', JSON.stringify(updatedJobs));
+    try {
+      await api.removeSavedJob(userKey, jobId);
+      const jobs = await api.getSavedJobs(userKey);
+      setSavedJobs(jobs || []);
+    } catch (e) {
+      console.warn('Failed to remove saved job:', e);
     }
-    setSavedJobs(updatedJobs.filter((j: any) => j.userKey === userKey));
   };
 
   const isJobSaved = (jobId: string) => {
-    const userKey = getUserKey();
-    return savedJobs.some((job) => job.id === jobId && job.userKey === userKey);
+    return savedJobs.some((job) => job.id === jobId);
   };
 
   const refreshSavedJobs = async () => {
     const userKey = getUserKey();
-    const jobs = (await getSavedJobs()).filter((j: any) => j.userKey === userKey);
-    setSavedJobs(jobs);
+    if (!userKey || userKey === 'default') {
+      setSavedJobs([]);
+      return;
+    }
+    try {
+      const jobs = await api.getSavedJobs(userKey);
+      setSavedJobs(jobs || []);
+    } catch (e) {
+      console.warn('Failed to refresh saved jobs:', e);
+    }
   };
 
   return (

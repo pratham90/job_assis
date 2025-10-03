@@ -14,6 +14,7 @@ import {
   Text,
   TouchableOpacity,
   View,
+  TextInput,
 } from "react-native";
 import {
   GestureHandlerRootView,
@@ -239,6 +240,17 @@ export default function SeekerJobs() {
   const [allJobs, setAllJobs] = useState<Job[]>([]);
   const [userLocation, setUserLocation] = useState<string>("");
   const [isLocationLoading, setIsLocationLoading] = useState(false);
+  const [customLocation, setCustomLocation] = useState<string>("");
+  const [isFetching, setIsFetching] = useState(false);
+
+  // Periodically refresh recommendations so new backend results appear automatically
+  useEffect(() => {
+    if (!user?.id) return;
+    const interval = setInterval(() => {
+      fetchJobs(user.id);
+    }, 30000); // every 30s
+    return () => clearInterval(interval);
+  }, [user, selectedLocation]);
 
   const locations = [
     "All Locations",
@@ -379,11 +391,14 @@ export default function SeekerJobs() {
   // Fetch jobs from backend and map to UI format
   const fetchJobs = async (clerkId: string) => {
     try {
-      setIsLoading(true);
+      if (isFetching) return; // prevent overlapping requests
+      setIsFetching(true);
+      if (jobs.length === 0) setIsLoading(true);
       setError(null);
       
       // Use the new API utility function
-      const jobsData = await api.getRecommendations(clerkId, 20);
+      const effectiveLocation = selectedLocation === 'All Locations' ? undefined : (selectedLocation === 'Live Location' ? userLocation || undefined : selectedLocation);
+      const jobsData = await api.getRecommendations(clerkId, 20, effectiveLocation);
       // jobsData: [{ job: {...}, match_score: ... }, ...]
       const mappedJobs: Job[] = jobsData.map((item: any) => {
         const job = item.job ? item.job : item;
@@ -415,12 +430,15 @@ export default function SeekerJobs() {
         // salary
         let salary = 'Salary not specified';
         if (job.salary && typeof job.salary === 'object') {
-          if (job.salary.min && job.salary.max && job.salary.currency) {
-            salary = `${job.salary.currency}${job.salary.min} - ${job.salary.currency}${job.salary.max}`;
-          } else if (job.salary.min && job.salary.currency) {
-            salary = `${job.salary.currency}${job.salary.min}`;
-          } else if (job.salary.currency) {
-            salary = `${job.salary.currency}`;
+          const sMin = typeof job.salary.min === 'number' ? job.salary.min : Number(job.salary.min);
+          const sMax = typeof job.salary.max === 'number' ? job.salary.max : Number(job.salary.max);
+          const sCur = job.salary.currency || '';
+          if (!isNaN(sMin) && !isNaN(sMax) && sCur) {
+            salary = `${sCur}${sMin} - ${sCur}${sMax}`;
+          } else if (!isNaN(sMin) && sCur) {
+            salary = `${sCur}${sMin}`;
+          } else if (sCur) {
+            salary = `${sCur}`;
           }
         } else if (typeof job.salary === 'string') {
           salary = job.salary;
@@ -498,13 +516,21 @@ export default function SeekerJobs() {
       } catch {}
       setJobs(mappedJobs);
       setAllJobs(mappedJobs);
-      filterJobsByLocation("All Locations", mappedJobs);
+      // Apply current selection immediately on newly fetched jobs
+      if (selectedLocation === "All Locations") {
+        filterJobsByLocation("All Locations", mappedJobs);
+      } else if (selectedLocation === "Live Location") {
+        filterJobsByLocation("Live Location", mappedJobs, userLocation || undefined);
+      } else {
+        filterJobsByLocation(selectedLocation, mappedJobs);
+      }
     } catch (err) {
       setError("Failed to load job applications. Please check your internet connection or try again later.");
       setJobs([]);
       setAllJobs([]);
     } finally {
       setIsLoading(false);
+      setIsFetching(false);
     }
   };
 
@@ -604,7 +630,12 @@ export default function SeekerJobs() {
     } else {
       setSelectedLocation(location);
       setShowLocationModal(false);
-      filterJobsByLocation(location, allJobs);
+      // Fetch fresh recommendations for this location from backend
+      if (user?.id) {
+        fetchJobs(user.id);
+      } else {
+        filterJobsByLocation(location, allJobs);
+      }
     }
   };
 
@@ -625,7 +656,7 @@ export default function SeekerJobs() {
     // Send swipe action to backend
     try {
       if (user?.id) {
-        await api.handleSwipeAction(user.id, job.id, 'dislike');
+        await api.handleSwipeAction(user.id, job.id, 'dislike', job);
       }
     } catch (error) {
       console.error('Failed to send swipe action to backend:', error);
@@ -649,7 +680,7 @@ export default function SeekerJobs() {
     // Send swipe action to backend
     try {
       if (user?.id) {
-        await api.handleSwipeAction(user.id, job.id, 'like');
+        await api.handleSwipeAction(user.id, job.id, 'like', job);
       }
     } catch (error) {
       console.error('Failed to send swipe action to backend:', error);
@@ -695,12 +726,15 @@ export default function SeekerJobs() {
       // Send save action to backend
       try {
         if (user?.id) {
-          await api.handleSwipeAction(user.id, job.id, 'save');
+          await api.handleSwipeAction(user.id, job.id, 'save', job);
         }
       } catch (error) {
         console.error('Failed to send save action to backend:', error);
       }
       
+      // Immediately remove from current recommendation queue
+      setJobs((prev) => prev.filter((j) => j.id !== job.id));
+
       Alert.alert(
         "Bookmarked! 🔖",
         ` ${job.title} has been saved to your bookmarks.`
@@ -875,21 +909,7 @@ export default function SeekerJobs() {
               </View>
             )}
 
-            {swipedJobs.length > 0 && (
-              <TouchableOpacity style={styles.resetButton} onPress={resetJobs}>
-                <Ionicons name="refresh-outline" size={14} color="#fff" />
-                <Text style={styles.resetButtonText}>Reset</Text>
-              </TouchableOpacity>
-            )}
-            {/* Debug list to show top fetched job titles */}
-            {jobs.length > 0 && (
-              <View style={{ marginTop: 8, alignItems: 'center' }}>
-                <Text style={{ color: '#cbd5e1', fontSize: 11, marginBottom: 4 }}>Top jobs from backend:</Text>
-                {jobs.slice(0, 5).map((j, idx) => (
-                  <Text key={j.id || idx} style={{ color: '#cbd5e1', fontSize: 10 }}>{idx + 1}. {j.title} • {j.company}</Text>
-                ))}
-              </View>
-            )}
+            {/* Reset button and debug list removed for production */}
           </View>
         )}
 
@@ -905,6 +925,34 @@ export default function SeekerJobs() {
                 >
                   <Ionicons name="close" size={20} color="#6b7280" />
                 </TouchableOpacity>
+              </View>
+              {/* Custom location input */}
+              <View style={{ paddingHorizontal: 16, paddingBottom: 8 }}>
+                <View style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  backgroundColor: '#f3f4f6',
+                  borderRadius: 8,
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                }}>
+                  <Ionicons name="search" size={16} color="#6b7280" />
+                  <TextInput
+                    placeholder="Type a city, state or country"
+                    placeholderTextColor="#9ca3af"
+                    style={{ marginLeft: 8, flex: 1, color: '#111827' }}
+                    value={customLocation}
+                    onChangeText={setCustomLocation}
+                    onSubmitEditing={() => customLocation && handleLocationSelect(customLocation)}
+                    returnKeyType="search"
+                  />
+                  <TouchableOpacity
+                    onPress={() => customLocation && handleLocationSelect(customLocation)}
+                    style={{ marginLeft: 8 }}
+                  >
+                    <Text style={{ color: '#3b82f6', fontWeight: '600' }}>Apply</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
               <ScrollView
                 style={styles.locationList}
@@ -1059,11 +1107,7 @@ export default function SeekerJobs() {
   );
 }
 
-type JobSwipeCardAllProps = JobSwipeCardProps & {
-  onSwipeAnimation: (direction: "left" | "right") => void;
-};
-
-    const JobSwipeCard: React.FC<JobSwipeCardAllProps> = ({
+export const JobSwipeCard: React.FC<JobSwipeCardAllProps> = ({
   job,
   onSwipeLeft,
   onSwipeRight,

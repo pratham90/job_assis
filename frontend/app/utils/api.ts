@@ -32,8 +32,9 @@ console.log('  API_BASE_URL:', API_BASE_URL);
 // API utility functions
 export const api = {
   // Get job recommendations for a user
-  async getRecommendations(clerkId: string, limit: number = 10) {
-    const url = `${API_BASE_URL}/api/recommend/${clerkId}?limit=${limit}`;
+  async getRecommendations(clerkId: string, limit: number = 10, location?: string) {
+    const locParam = location ? `&location=${encodeURIComponent(location)}` : '';
+    const url = `${API_BASE_URL}/api/recommend/${clerkId}?limit=${limit}${locParam}`;
     console.log('📡 Fetching recommendations from:', url);
     
     const response = await fetch(url);
@@ -51,7 +52,7 @@ export const api = {
   },
 
   // Handle swipe actions (like, dislike, save)
-  async handleSwipeAction(userId: string, jobId: string, action: 'like' | 'dislike' | 'save' | 'apply' | 'super_like') {
+  async handleSwipeAction(userId: string, jobId: string, action: 'like' | 'dislike' | 'save' | 'apply' | 'super_like', jobPayload?: any) {
     const response = await fetch(`${API_BASE_URL}/api/recommend/swipe`, {
       method: 'POST',
       headers: {
@@ -61,12 +62,31 @@ export const api = {
         user_id: userId,
         job_id: jobId,
         action: action,
+        job_payload: jobPayload,
       }),
     });
     
     if (!response.ok) {
       throw new Error(`Failed to handle swipe action: ${response.statusText}`);
     }
+    return response.json();
+  },
+
+  // Saved jobs APIs
+  async getSavedJobs(clerkId: string) {
+    const url = `${API_BASE_URL}/api/recommend/saved/${clerkId}`;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Failed to fetch saved jobs: ${response.statusText}`);
+    return response.json();
+  },
+
+  async removeSavedJob(userId: string, jobId: string) {
+    const response = await fetch(`${API_BASE_URL}/api/recommend/saved/remove`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, job_id: jobId }),
+    });
+    if (!response.ok) throw new Error(`Failed to remove saved job: ${response.statusText}`);
     return response.json();
   },
 
