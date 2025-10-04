@@ -291,21 +291,86 @@ class Database:
             try:
                 print(f"\n🔄 STEP 2: Fetching cached jobs from Redis (need {remaining_needed} more)...")
                 
-                job_keys = await self.redis_client.keys("job-scraping:*")
+                # Use simple cluster-based job retrieval
+                # Default behavior: Show jobs from both clusters (All Locations)
+                if location and location.lower() == "usa":
+                    # Get job IDs from USA cluster only
+                    usa_job_ids = await self.redis_client.smembers("cluster:usa:jobs")
+                    job_ids = [job_id.decode('utf-8') if isinstance(job_id, bytes) else job_id for job_id in usa_job_ids]
+                    cluster_info = "USA cluster"
+                elif location and location.lower() == "india":
+                    # Get job IDs from India cluster only
+                    india_job_ids = await self.redis_client.smembers("cluster:india:jobs")
+                    job_ids = [job_id.decode('utf-8') if isinstance(job_id, bytes) else job_id for job_id in india_job_ids]
+                    cluster_info = "India cluster"
+                else:
+                    # DEFAULT: Get job IDs from BOTH clusters (All Locations/No filter)
+                    usa_job_ids = await self.redis_client.smembers("cluster:usa:jobs")
+                    india_job_ids = await self.redis_client.smembers("cluster:india:jobs")
+                    
+                    # Combine both clusters
+                    all_job_ids = list(usa_job_ids) + list(india_job_ids)
+                    job_ids = [job_id.decode('utf-8') if isinstance(job_id, bytes) else job_id for job_id in all_job_ids]
+                    cluster_info = f"All Locations - Combined clusters (USA: {len(usa_job_ids)}, India: {len(india_job_ids)})"
                 scraped_count = 0
                 
-                print(f"📊 Found {len(job_keys)} cached job keys in Redis")
+                print(f"📊 Found {len(job_ids)} cached job IDs from {cluster_info}")
                 
-                # LOOP PREVENTION: Limit the keys we process
-                max_keys_to_process = min(len(job_keys), remaining_needed * 3, 200)  # Cap at 200
+                # LOOP PREVENTION: Limit the jobs we process
+                max_jobs_to_process = min(len(job_ids), remaining_needed * 3, 200)  # Cap at 200
                 
-                for key in job_keys[:max_keys_to_process]:
-                    job_data = await self.redis_client.hgetall(key)
+                for job_id in job_ids[:max_jobs_to_process]:
+                    job_data = await self.redis_client.hgetall(f"job:{job_id}")
                     if job_data:
-                        # Always try to convert Redis jobs (skip criteria matching)
+                        # Convert Redis job first
                         converted_job = self._convert_scraped_job(job_data)
                         
                         if converted_job:
+                            # Apply location filtering to Redis jobs
+                            if location and location.strip() and location.lower() not in ["all locations", "all"]:
+                                location_lower = location.lower()
+                                
+                                # Handle location data format (could be dict or string)
+                                job_location_raw = converted_job.get('location', '')
+                                if isinstance(job_location_raw, dict):
+                                    # Extract location string from dict
+                                    parts = [
+                                        str(job_location_raw.get('city', '')),
+                                        str(job_location_raw.get('state', '')),
+                                        str(job_location_raw.get('country', ''))
+                                    ]
+                                    job_location = ' '.join(parts).lower()
+                                else:
+                                    job_location = str(job_location_raw).lower()
+                                
+                                # Enhanced location matching for USA and India
+                                if location_lower == "usa":
+                                    usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
+                                                  'texas', 'washington', 'massachusetts', 'illinois', 'colorado',
+                                                  ', ca', ', ny', ', tx', 'san francisco', 'los angeles', 'seattle']
+                                    if not any(keyword in job_location for keyword in usa_keywords):
+                                        continue  # Skip this job
+                                    # Exclude jobs that also contain India keywords
+                                    india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
+                                                    'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
+                                    if any(india_keyword in job_location for india_keyword in india_keywords):
+                                        continue  # Skip this job
+                                elif location_lower == "india":
+                                    india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
+                                                    'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
+                                    if not any(keyword in job_location for keyword in india_keywords):
+                                        continue  # Skip this job
+                                    # Exclude jobs that also contain USA keywords
+                                    usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
+                                                  'texas', 'washington', 'massachusetts', 'illinois', 'colorado']
+                                    if any(usa_keyword in job_location for usa_keyword in usa_keywords):
+                                        continue  # Skip this job
+                                else:
+                                    # Generic location matching
+                                    if location_lower not in job_location and "remote" not in job_location:
+                                        continue  # Skip this job
+                            
+                            # Job passed location filter, add it
                             converted_job["source"] = "scraped"
                             converted_job["priority"] = 0.7
                             all_jobs.append(converted_job)
@@ -324,9 +389,13 @@ class Database:
         
         # LOOP PREVENTION: Only scrape if we have very few jobs and haven't scraped recently
         # OR if force_scrape is explicitly requested
+        # For "All Locations" (default), be more conservative about scraping
+        is_default_or_all_locations = (not location or location.strip() == "" or 
+                                      (location and location.lower() == "all locations"))
+        min_jobs_threshold = 20 if is_default_or_all_locations else max(50, limit * 0.1)
         should_scrape = (
             remaining_needed > 0 and 
-            (len(all_jobs) < max(50, limit * 0.1) or force_scrape)  # Scrape if few jobs OR force_scrape=True
+            (len(all_jobs) < min_jobs_threshold or force_scrape)  # Scrape if few jobs OR force_scrape=True
         )
         
         if should_scrape:
@@ -344,7 +413,28 @@ class Database:
                     
                     # Use broader search terms for LinkedIn scraping
                     broad_keywords = "software engineer developer python javascript"
-                    broad_location = "United States" if location and "United States" in location else "India"
+                    
+                    # Map location filter to LinkedIn-compatible location
+                    if location and location.lower() == "usa":
+                        broad_location = "United States"
+                    elif location and location.lower() == "india":
+                        broad_location = "India"
+                    elif location and location.lower() == "all locations":
+                        # For "All Locations", don't scrape if we have enough cached jobs
+                        if len(all_jobs) >= 20:  # If we have 20+ jobs, don't scrape
+                            print(f"   Skipping scraping for 'All Locations' - have {len(all_jobs)} cached jobs")
+                            return all_jobs  # Return early without scraping
+                        broad_location = "United States"  # Default to USA for scraping
+                    elif not location or location.strip() == "":
+                        # DEFAULT: No location specified - treat as "All Locations"
+                        if len(all_jobs) >= 20:  # If we have 20+ jobs, don't scrape
+                            print(f"   Skipping scraping for default (All Locations) - have {len(all_jobs)} cached jobs")
+                            return all_jobs  # Return early without scraping
+                        broad_location = "United States"  # Default to USA for scraping
+                    elif location and location.strip():
+                        broad_location = location  # Use the original location
+                    else:
+                        broad_location = "United States"  # Default to USA for empty location
                     
                     print(f"   Using broader terms: keywords='{broad_keywords}', location='{broad_location}'")
                     
@@ -402,17 +492,37 @@ class Database:
                                job_type_filter: str, category_filter: str, trusted_only: bool) -> bool:
         """Check if a Redis job matches the search criteria"""
         try:
-            # Skip all filtering for Redis jobs to get maximum results
-            # Users can filter on frontend if needed
-            return True
-            
-            # Handle location filtering - if empty or "All Locations", don't filter
+            # Apply location filtering for Redis jobs
             if location and location.strip() and location.lower() not in ["all locations", "all"]:
                 location_lower = location.lower()
                 job_location = job_data.get('location', '').lower()
-                # Only filter if location is specified and not "all locations"
-                if location_lower not in job_location and "remote" not in job_location:
-                    return False
+                
+                # Enhanced location matching for USA and India
+                if location_lower == "usa":
+                    usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
+                                  'texas', 'washington', 'massachusetts', 'illinois', 'colorado',
+                                  ', ca', ', ny', ', tx', 'san francisco', 'los angeles', 'seattle']
+                    if not any(keyword in job_location for keyword in usa_keywords):
+                        return False
+                    # Exclude jobs that also contain India keywords
+                    india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
+                                    'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
+                    if any(india_keyword in job_location for india_keyword in india_keywords):
+                        return False
+                elif location_lower == "india":
+                    india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
+                                    'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
+                    if not any(keyword in job_location for keyword in india_keywords):
+                        return False
+                    # Exclude jobs that also contain USA keywords
+                    usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
+                                  'texas', 'washington', 'massachusetts', 'illinois', 'colorado']
+                    if any(usa_keyword in job_location for usa_keyword in usa_keywords):
+                        return False
+                else:
+                    # Generic location matching
+                    if location_lower not in job_location and "remote" not in job_location:
+                        return False
             
             if job_type_filter:
                 job_type = job_data.get('employment_type', job_data.get('job_type', '')).lower()
@@ -457,8 +567,8 @@ class Database:
                 "skills_required": job_data.get('skills', job_data.get('skills_required', [])),
                 "benefits": job_data.get('benefits', []),
                 "is_active": True,
-                "posted_at": job_data.get('posted_date', job_data.get('posted_at', datetime.now().strftime('%Y-%m-%d'))),
-                "expires_at": job_data.get('expires_at', '2024-12-31'),
+                "posted_at": self._parse_datetime(job_data.get('posted_date', job_data.get('posted_at', datetime.now().strftime('%Y-%m-%d')))),
+                "expires_at": self._parse_datetime(job_data.get('expires_at', '2024-12-31')),
                 "company": job_data.get('company', ''),
                 "url": job_data.get('url', job_data.get('job_link', '')),
                 "experience_level": job_data.get('experience_level', ''),
@@ -566,6 +676,31 @@ class Database:
             print(f"Error converting MongoDB job: {e}")
             return None
     
+    def _parse_datetime(self, date_input) -> datetime:
+        """Parse various date formats into datetime objects"""
+        from datetime import datetime
+        
+        if isinstance(date_input, datetime):
+            return date_input
+        
+        if isinstance(date_input, str):
+            try:
+                # Handle YYYY-MM-DD format
+                if len(date_input) == 10 and date_input.count('-') == 2:
+                    return datetime.strptime(date_input, '%Y-%m-%d')
+                # Handle ISO format
+                elif 'T' in date_input or 'Z' in date_input:
+                    return datetime.fromisoformat(date_input.replace('Z', '+00:00'))
+                else:
+                    # Try parsing as ISO format
+                    return datetime.fromisoformat(date_input)
+            except:
+                # Default fallback
+                return datetime(2024, 1, 1)
+        
+        # Default fallback for any other type
+        return datetime(2024, 1, 1)
+
     def _convert_scraped_job(self, job_data: dict) -> dict:
         """Convert scraped job data to our expected format"""
         try:
@@ -613,20 +748,9 @@ class Database:
             # Generate a unique ID if not present - handle Redis data structure
             job_id = job_data.get('job_id') or job_data.get('_id') or str(hash(job_data.get('title', '')))
             
-            # Handle posted_at date - convert string dates to proper datetime
-            posted_at_raw = job_data.get('posted_date', '2024-01-01')
-            if isinstance(posted_at_raw, str):
-                try:
-                    # Try to parse the date string
-                    from datetime import datetime
-                    if len(posted_at_raw) == 10:  # Format: YYYY-MM-DD
-                        posted_at = datetime.strptime(posted_at_raw, '%Y-%m-%d')
-                    else:
-                        posted_at = datetime.fromisoformat(posted_at_raw.replace('Z', '+00:00'))
-                except:
-                    posted_at = datetime(2024, 1, 1)  # Default fallback
-            else:
-                posted_at = posted_at_raw
+            # Handle posted_at and expires_at dates using helper method
+            posted_at = self._parse_datetime(job_data.get('posted_date', job_data.get('posted_at', '2024-01-01')))
+            expires_at = self._parse_datetime(job_data.get('expires_at', '2024-12-31'))
             
             # Create a robust job object with all required fields
             job_obj = {
@@ -643,7 +767,7 @@ class Database:
                 "benefits": [],
                 "is_active": True,
                 "posted_at": posted_at,  # Use the parsed datetime
-                "expires_at": None,  # Set to None to avoid validation errors
+                "expires_at": expires_at,  # Use the parsed datetime
                 "company": job_data.get('company', 'Unknown Company'),
                 "url": job_data.get('url', ''),
                 "experience_level": job_data.get('experience_level', 'Not specified'),

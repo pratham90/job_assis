@@ -234,7 +234,7 @@ export default function SeekerJobs() {
   const [showOverlay, setShowOverlay] = useState(true);
 
   const [selectedLocation, setSelectedLocation] =
-    useState<string>("All Locations");
+    useState<string>("All Locations"); // Default to All Locations
   const [showLocationModal, setShowLocationModal] = useState(false);
   const [allJobs, setAllJobs] = useState<Job[]>([]);
   const [userLocation, setUserLocation] = useState<string>("");
@@ -242,13 +242,34 @@ export default function SeekerJobs() {
   const [isFetching, setIsFetching] = useState(false);
 
   // Periodically refresh recommendations so new backend results appear automatically
+  // Only refresh if user is actively using the app and not currently fetching
+  useEffect(() => {
+    if (!user?.id || isFetching) return;
+    
+    // Only refresh every 5 minutes instead of 30 seconds to prevent constant refreshes
+    const interval = setInterval(() => {
+      if (!isFetching && jobs.length > 0) {
+        console.log('🔄 Periodic refresh triggered with location:', selectedLocation);
+        fetchJobs(user.id);
+      }
+    }, 300000); // every 5 minutes
+
+    return () => clearInterval(interval);
+  }, [user?.id, isFetching]);
+
+  // Debounced effect for location changes - provides instant feedback
   useEffect(() => {
     if (!user?.id) return;
-    const interval = setInterval(() => {
-      fetchJobs(user.id);
-    }, 30000); // every 30s
-    return () => clearInterval(interval);
-  }, [user, selectedLocation]);
+    
+    const timeoutId = setTimeout(() => {
+      if (!isFetching) {
+        console.log('🔄 Location changed, fetching new jobs...');
+        fetchJobs(user.id);
+      }
+    }, 500); // 500ms debounce
+
+    return () => clearTimeout(timeoutId);
+  }, [selectedLocation]);
 
   const locations = [
     "All Locations",
@@ -356,18 +377,21 @@ export default function SeekerJobs() {
   // Fetch jobs from backend and map to UI format
   const fetchJobs = async (clerkId: string) => {
     try {
-      if (isFetching) return; // prevent overlapping requests
+      if (isFetching) {
+        console.log('⏳ Already fetching jobs, skipping...');
+        return; // prevent overlapping requests
+      }
       setIsFetching(true);
       if (jobs.length === 0) setIsLoading(true);
       setError(null);
+      
+      console.log('🔄 Fetching jobs for user:', clerkId);
+      console.log('📍 Selected location:', selectedLocation);
       
       // Use the new API utility function
       const effectiveLocation = selectedLocation === 'All Locations' 
         ? 'All Locations' 
         : selectedLocation;
-      
-      console.log('📍 Selected location:', selectedLocation);
-      console.log('📍 Effective location:', effectiveLocation);
       
       const jobsData = await api.getRecommendations(clerkId, 20, effectiveLocation);
       // jobsData: [{ job: {...}, match_score: ... }, ...]
@@ -533,10 +557,8 @@ export default function SeekerJobs() {
           setUserLocation(locationString);
           setSelectedLocation("Live Location");
           setShowLocationModal(false);
-          // Fetch fresh jobs for this location
-          if (user?.id) {
-            fetchJobs(user.id);
-          }
+          // Show loading state - debounced effect will handle fetch
+          setIsLoading(true);
 
           Alert.alert(
             "Location Found! 📍",
@@ -554,10 +576,8 @@ export default function SeekerJobs() {
         setUserLocation(locationString);
         setSelectedLocation("Live Location");
         setShowLocationModal(false);
-        // Fetch fresh jobs for this location
-        if (user?.id) {
-          fetchJobs(user.id);
-        }
+        // Show loading state - debounced effect will handle fetch
+        setIsLoading(true);
 
         Alert.alert("Location Found! 📍", `Jobs filtered for your location`, [
           { text: "Great!", style: "default" },
@@ -596,10 +616,11 @@ export default function SeekerJobs() {
   const handleLocationSelect = (location: string) => {
     setSelectedLocation(location);
     setShowLocationModal(false);
-    // Fetch fresh recommendations for this location from backend
-    if (user?.id) {
-      fetchJobs(user.id);
-    }
+    
+    // Show loading state for instant feedback
+    setIsLoading(true);
+    
+    // The debounced useEffect will handle the actual fetch
   };
 
   // No need to fetchApplications on mount; jobs are fetched after user check/create

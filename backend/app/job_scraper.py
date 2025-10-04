@@ -662,6 +662,33 @@ class RedisJobDataCache:
         search_params = f"{keywords}_{location}_{max_jobs}_{job_type_filter}_{category_filter}_{trusted_only}"
         return hashlib.md5(search_params.encode()).hexdigest()
     
+    def _determine_remote_status(self, job_data: dict) -> str:
+        """Determine if a job is remote based on location and description"""
+        try:
+            location = job_data.get('location', '').lower()
+            description = job_data.get('description', '').lower()
+            
+            # Check for remote keywords in location
+            remote_location_keywords = ['remote', 'work from home', 'wfh', 'virtual', 'anywhere']
+            if any(keyword in location for keyword in remote_location_keywords):
+                return 'remote'
+            
+            # Check for remote keywords in description
+            remote_desc_keywords = ['remote work', 'work from home', 'wfh', 'virtual', 'distributed team', 'remote-first']
+            if any(keyword in description for keyword in remote_desc_keywords):
+                return 'remote'
+            
+            # Check for hybrid keywords
+            hybrid_keywords = ['hybrid', 'flexible', 'partially remote']
+            if any(keyword in location or keyword in description for keyword in hybrid_keywords):
+                return 'hybrid'
+            
+            return 'on-site'
+            
+        except Exception as e:
+            logger.error(f"Error determining remote status: {e}")
+            return 'on-site'
+    
     def save_job_to_redis(self, job_data: Dict) -> bool:
         """Save individual job to Redis hash with country-based partitioning"""
         try:
@@ -672,16 +699,53 @@ class RedisJobDataCache:
             
             job_id = job_data['job_id']
             
-            # Extract country from location or use default
+            # SIMPLIFIED: Only create 2 clusters - USA and India
             location = job_data.get('location', '').lower()
-            country = 'india'  # Default country
+            country = 'global'  # Default for other countries
             
-            # Try to extract country from location
-            if ',' in location:
-                country = location.split(',')[-1].strip().lower()
+            # Check for USA (including all US states)
+            usa_keywords = ['usa', 'us', 'united states', 'california', 'new york', 'texas', 'washington', 
+                          'massachusetts', 'georgia', 'pennsylvania', 'illinois', 'colorado', 'florida',
+                          'arizona', 'nevada', 'oregon', 'utah', 'idaho', 'montana', 'wyoming',
+                          'north dakota', 'south dakota', 'nebraska', 'kansas', 'oklahoma', 'arkansas',
+                          'louisiana', 'mississippi', 'alabama', 'tennessee', 'kentucky', 'indiana',
+                          'ohio', 'michigan', 'wisconsin', 'minnesota', 'iowa', 'missouri', 'alaska',
+                          'hawaii', 'vermont', 'new hampshire', 'maine', 'rhode island', 'connecticut',
+                          'new jersey', 'delaware', 'maryland', 'virginia', 'west virginia', 'north carolina',
+                          'south carolina', 'san francisco', 'los angeles', 'seattle', 'chicago', 'boston',
+                          'atlanta', 'philadelphia', 'denver', 'miami', 'phoenix', 'las vegas', 'portland',
+                          'salt lake city', 'boise', 'billings', 'cheyenne', 'fargo', 'rapid city',
+                          'omaha', 'wichita', 'oklahoma city', 'little rock', 'new orleans', 'jackson',
+                          'birmingham', 'nashville', 'louisville', 'indianapolis', 'columbus', 'detroit',
+                          'milwaukee', 'minneapolis', 'des moines', 'kansas city', 'anchorage', 'honolulu',
+                          'burlington', 'concord', 'augusta', 'providence', 'hartford', 'trenton',
+                          'dover', 'annapolis', 'richmond', 'charleston', 'raleigh', 'columbia']
             
-            # Create country-specific key
-            redis_key = f"{country}:{self.hash_name}:{job_id}"
+            # Check for India
+            india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 'hyderabad', 
+                            'chennai', 'pune', 'kolkata', 'ahmedabad', 'gurgaon', 'noida', 'kochi',
+                            'chandigarh', 'indore', 'bhopal', 'jaipur', 'lucknow', 'kanpur', 'nagpur',
+                            'visakhapatnam', 'coimbatore', 'madurai', 'rajkot', 'varanasi', 'srinagar',
+                            'amritsar', 'ludhiana', 'agra', 'nashik', 'faridabad', 'meerut', 'rajkot',
+                            'kalyan', 'vasai', 'vijayawada', 'jodhpur', 'madurai', 'ranchi', 'howrah',
+                            'coimbatore', 'raipur', 'jabalpur', 'gwalior', 'bhubaneswar', 'mysore',
+                            'tiruchirappalli', 'bhubaneshwar', 'salem', 'warangal', 'guntur', 'bhiwandi',
+                            'amravati', 'nanded', 'kolhapur', 'sangli', 'malegaon', 'ulhasnagar',
+                            'jalgaon', 'akola', 'latur', 'ahmednagar', 'chandrapur', 'parbhani', 'ichalkaranji',
+                            'jalna', 'bhusawal', 'ambajogai', 'yavatmal', 'kamptee', 'gondia', 'barsi',
+                            'achalpur', 'osmanabad', 'nandurbar', 'wardha', 'udgir', 'aurangabad']
+            
+            if any(keyword in location for keyword in usa_keywords):
+                country = 'usa'
+            elif any(keyword in location for keyword in india_keywords):
+                country = 'india'
+            
+            # Create cluster-based storage system
+            # Store job data with simple key
+            redis_key = f"job:{job_id}"
+            
+            # Add job to country-specific cluster
+            cluster_key = f"cluster:{country}:jobs"
 
             # Prepare job fields for Redis Hash
             redis_fields = {
@@ -706,12 +770,13 @@ class RedisJobDataCache:
                 'expires_at': (datetime.now() + timedelta(seconds=self.cache_duration_seconds)).isoformat()
             }
             
-            # Save to Redis Hash with country prefix
+            # Save job data to Redis Hash
             self.redis_client.hset(redis_key, mapping=redis_fields)
             self.redis_client.expire(redis_key, self.cache_duration_seconds)
             
-            # Add to country-specific job index
-            self.redis_client.sadd(f"{country}:jobs", job_id)
+            # Add job ID to country-specific cluster only
+            self.redis_client.sadd(cluster_key, job_id)
+            self.redis_client.expire(cluster_key, self.cache_duration_seconds)
             
             return True
             
@@ -782,12 +847,13 @@ class RedisJobDataCache:
                 self.clear_search_cache(cache_key)
                 return None
             
-            # Load individual jobs
+            # Load individual jobs from country-specific storage
             job_ids = json.loads(search_data.get('job_ids', '[]'))
             jobs_data = []
             
             for job_id in job_ids:
-                job_data = self.redis_client.hgetall(f"{self.hash_name}:{job_id}")
+                # Get job data using cluster-based key
+                job_data = self.redis_client.hgetall(f"job:{job_id}")
                 if job_data:
                     # Convert Redis hash back to job dictionary
                     processed_job = self._process_redis_job_data(job_data)
@@ -884,9 +950,14 @@ class RedisJobDataCache:
             if search_data and 'job_ids' in search_data:
                 job_ids = json.loads(search_data['job_ids'])
                 
-                # Remove individual job hashes
+                # Remove individual job hashes and from clusters
                 for job_id in job_ids:
-                    self.redis_client.delete(f"{self.hash_name}:{job_id}")
+                    # Remove job data
+                    self.redis_client.delete(f"job:{job_id}")
+                    
+                    # Remove from USA and India clusters only
+                    self.redis_client.srem("cluster:usa:jobs", job_id)
+                    self.redis_client.srem("cluster:india:jobs", job_id)
             
             # Remove search metadata
             self.redis_client.delete(f"search:{cache_key}")

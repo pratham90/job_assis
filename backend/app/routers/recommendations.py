@@ -285,6 +285,11 @@ async def get_recommendations(
                             str(job_data['location'].get('country', ''))
                         ]
                         job_location_str = ' '.join(parts).lower()
+                    else:
+                        # Handle other formats or missing location
+                        job_location_str = str(job_data.get('location', '')).lower()
+                    
+                    print(f"🔍 Checking job location: '{job_location_str}' against filter: '{location}'")
                     
                     # Check if job matches the selected location
                     if location.lower() == "india":
@@ -292,18 +297,34 @@ async def get_recommendations(
                         india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
                                         'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
                         loc_ok = any(keyword in job_location_str for keyword in india_keywords)
+                        # Exclude jobs that also contain USA keywords
+                        usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
+                                      'texas', 'washington', 'massachusetts', 'illinois', 'colorado']
+                        if any(usa_keyword in job_location_str for usa_keyword in usa_keywords):
+                            loc_ok = False
+                        print(f"🇮🇳 India filter check: {loc_ok} (keywords: {india_keywords})")
                     elif location.lower() == "usa":
                         # Check for USA or US states/cities
                         usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
                                       'texas', 'washington', 'massachusetts', 'illinois', 'colorado',
                                       ', ca', ', ny', ', tx', 'san francisco', 'los angeles', 'seattle']
                         loc_ok = any(keyword in job_location_str for keyword in usa_keywords)
+                        # Exclude jobs that also contain India keywords
+                        india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
+                                        'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
+                        if any(india_keyword in job_location_str for india_keyword in india_keywords):
+                            loc_ok = False
+                        print(f"🇺🇸 USA filter check: {loc_ok} (keywords: {usa_keywords})")
                     else:
                         # Generic location matching
                         loc_ok = location.lower() in job_location_str
+                        print(f"🌍 Generic filter check: {loc_ok}")
                     
                     if not loc_ok:
+                        print(f"❌ Job location '{job_location_str}' doesn't match filter '{location}', skipping...")
                         continue
+                    else:
+                        print(f"✅ Job location '{job_location_str}' matches filter '{location}', including...")
 
                 job_model = JobPosting(**job_data)
                 job_models.append(job_model)
@@ -339,44 +360,87 @@ async def get_recommendations(
             print(f"⚠️  Only {len(filtered_job_models)} jobs available, need {limit}")
             print(f"🔄 Attempting to fetch more jobs from Redis/LinkedIn...")
             
-            # Try to get more jobs with relaxed criteria
+            # Try to get more jobs with the SAME location filter first
             try:
                 additional_jobs = await db.get_active_jobs(
                     limit=limit * 2,  # Get more jobs
                     keywords="",  # No keyword filtering
-                    location="",  # No location filtering
+                    location=location,  # Keep the same location filter
                     job_type_filter=None,
                     category_filter=None,
                     trusted_only=False,  # Include all companies
                     force_scrape=True  # Force LinkedIn scraping
                 )
                 
-                print(f"📊 Additional jobs fetched: {len(additional_jobs)}")
+                print(f"📊 Additional jobs fetched with location filter: {len(additional_jobs)}")
                 
                 # Process additional jobs (already converted by get_active_jobs)
+                additional_job_models = []
                 for job in additional_jobs:
                     try:
-                        # Jobs from get_active_jobs are already converted
                         if isinstance(job, dict):
                             job_data = job
                         else:
                             job_data = convert_mongo_doc(job)
                         
-                        job_model = JobPosting(**job_data)
-                        
-                        # Only add if not already liked/disliked AND not already in filtered_job_models
-                        if (job_model.id not in liked_job_ids and 
-                            job_model.id not in disliked_job_ids and
-                            job_model.id not in [j.id for j in filtered_job_models]):
-                            filtered_job_models.append(job_model)
+                        # Apply the same location filter to additional jobs
+                        if location and location != "All Locations":
+                            loc_ok = False
+                            job_location_str = ""
                             
-                            if len(filtered_job_models) >= limit:
-                                break
-                    except Exception as e:
-                        continue
+                            if isinstance(job_data.get('location'), str):
+                                job_location_str = job_data['location'].lower()
+                            elif isinstance(job_data.get('location'), dict):
+                                parts = [
+                                    str(job_data['location'].get('city', '')),
+                                    str(job_data['location'].get('state', '')),
+                                    str(job_data['location'].get('country', ''))
+                                ]
+                                job_location_str = ' '.join(parts).lower()
+                            else:
+                                job_location_str = str(job_data.get('location', '')).lower()
+                            
+                            # Apply the same filtering logic
+                            if location.lower() == "usa":
+                                usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
+                                              'texas', 'washington', 'massachusetts', 'illinois', 'colorado',
+                                              ', ca', ', ny', ', tx', 'san francisco', 'los angeles', 'seattle']
+                                loc_ok = any(keyword in job_location_str for keyword in usa_keywords)
+                                india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
+                                                'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
+                                if any(india_keyword in job_location_str for india_keyword in india_keywords):
+                                    loc_ok = False
+                            elif location.lower() == "india":
+                                india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
+                                                'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
+                                loc_ok = any(keyword in job_location_str for keyword in india_keywords)
+                                usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
+                                              'texas', 'washington', 'massachusetts', 'illinois', 'colorado']
+                                if any(usa_keyword in job_location_str for usa_keyword in usa_keywords):
+                                    loc_ok = False
+                            else:
+                                loc_ok = location.lower() in job_location_str
+                            
+                            if not loc_ok:
+                                continue
                         
+                        job_model = JobPosting(**job_data)
+                        additional_job_models.append(job_model)
+                    except Exception as e:
+                        print(f"❌ Skipping invalid additional job: {str(e)}")
+                        continue
+                
+                # Add additional jobs to the main list, avoiding duplicates
+                existing_job_ids = {job.id for job in filtered_job_models}
+                unique_additional_jobs = [job for job in additional_job_models if job.id not in existing_job_ids]
+                
+                filtered_job_models.extend(unique_additional_jobs)
+                print(f"📊 Additional jobs fetched: {len(additional_job_models)}")
+                print(f"📊 Unique additional jobs added: {len(unique_additional_jobs)}")
+                print(f"📊 Total jobs after additional fetch: {len(filtered_job_models)}")
+                
             except Exception as e:
-                print(f"❌ Error fetching additional jobs: {e}")
+                print(f"❌ Failed to fetch additional jobs: {str(e)}")
         
         print(f"📊 Final job count: {len(filtered_job_models)} jobs")
 
