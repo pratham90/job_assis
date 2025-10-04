@@ -618,9 +618,9 @@ class RedisJobDataCache:
                  redis_db: int = 0, redis_password: str = None, 
                  cache_duration_hours: int = 72):
         """Initialize Redis cache manager"""
-        self.cache_duration_seconds = cache_duration_hours * 3600
         self.hash_name = "job-scraping"
-        
+        self.cache_duration_seconds = cache_duration_hours * 3600
+
         # Test connection with retry
         max_retries = 3
 
@@ -663,7 +663,7 @@ class RedisJobDataCache:
         return hashlib.md5(search_params.encode()).hexdigest()
     
     def save_job_to_redis(self, job_data: Dict) -> bool:
-        """Save individual job to Redis hash with comprehensive fields"""
+        """Save individual job to Redis hash with country-based partitioning"""
         try:
             # Generate unique job ID if not present
             if 'job_id' not in job_data:
@@ -672,13 +672,25 @@ class RedisJobDataCache:
             
             job_id = job_data['job_id']
             
-            # Prepare comprehensive job fields for Redis Hash
+            # Extract country from location or use default
+            location = job_data.get('location', '').lower()
+            country = 'india'  # Default country
+            
+            # Try to extract country from location
+            if ',' in location:
+                country = location.split(',')[-1].strip().lower()
+            
+            # Create country-specific key
+            redis_key = f"{country}:{self.hash_name}:{job_id}"
+
+            # Prepare job fields for Redis Hash
             redis_fields = {
                 'title': job_data.get('title', ''),
                 'company': job_data.get('company', ''),
                 'skills': json.dumps(job_data.get('skills', [])),
                 'salary': job_data.get('salary', ''),
                 'location': job_data.get('location', ''),
+                'country': country,  # Add country field
                 'job_type': job_data.get('job_type', ''),
                 'experience_level': job_data.get('experience_level', ''),
                 'category': job_data.get('category', ''),
@@ -694,63 +706,60 @@ class RedisJobDataCache:
                 'expires_at': (datetime.now() + timedelta(seconds=self.cache_duration_seconds)).isoformat()
             }
             
-            # Save to Redis Hash
-            self.redis_client.hset(f"{self.hash_name}:{job_id}", mapping=redis_fields)
+            # Save to Redis Hash with country prefix
+            self.redis_client.hset(redis_key, mapping=redis_fields)
+            self.redis_client.expire(redis_key, self.cache_duration_seconds)
             
-            # Set expiration for the individual job hash
-            self.redis_client.expire(f"{self.hash_name}:{job_id}", self.cache_duration_seconds)
+            # Add to country-specific job index
+            self.redis_client.sadd(f"{country}:jobs", job_id)
             
             return True
             
         except Exception as e:
             logger.error(f"Error saving job to Redis: {str(e)}")
             return False
-    
-    def _determine_remote_status(self, job_data: Dict) -> str:
-        """Determine remote work status from job data"""
-        location = job_data.get('location', '').lower()
-        description = job_data.get('description', '').lower()
-        title = job_data.get('title', '').lower()
-        
-        remote_indicators = ['remote', 'work from home', 'wfh', 'telecommute']
-        hybrid_indicators = ['hybrid', 'flexible', 'part remote']
-        
-        combined_text = f"{location} {description} {title}"
-        
-        if any(indicator in combined_text for indicator in hybrid_indicators):
-            return 'Hybrid'
-        elif any(indicator in combined_text for indicator in remote_indicators):
-            return 'Yes'
-        else:
-            return 'No'
-    
+
     def save_to_cache(self, cache_key: str, jobs_data: List[Dict], metadata: Dict = None) -> bool:
-        """Save job search results to Redis with metadata"""
+        """Save job search results to Redis with country-based partitioning"""
         try:
-            # Save individual jobs to Redis hashes
-            saved_job_ids = []
+            # Group jobs by country
+            country_jobs = {}
             for job_data in jobs_data:
-                if self.save_job_to_redis(job_data):
-                    saved_job_ids.append(job_data.get('job_id'))
+                location = job_data.get('location', '').lower()
+                country = 'india'  # Default country
+                
+                if ',' in location:
+                    country = location.split(',')[-1].strip().lower()
+                
+                country_jobs.setdefault(country, []).append(job_data)
+
+            saved_job_ids = []
+            for country, country_specific_jobs in country_jobs.items():
+                # Save individual jobs with country prefix
+                for job_data in country_specific_jobs:
+                    if self.save_job_to_redis(job_data):
+                        saved_job_ids.append(job_data.get('job_id'))
+
+                # Save country-specific search results
+                country_search_key = f"{country}:search:{cache_key}"
+                search_metadata = {
+                    'cache_key': cache_key,
+                    'country': country,
+                    'job_ids': json.dumps(saved_job_ids),
+                    'job_count': len(saved_job_ids),
+                    'metadata': json.dumps(metadata or {}),
+                    'created_at': datetime.now().isoformat(),
+                    'expires_at': (datetime.now() + timedelta(seconds=self.cache_duration_seconds)).isoformat()
+                }
+                
+                # Store country-specific search metadata
+                self.redis_client.hset(country_search_key, mapping=search_metadata)
+                self.redis_client.expire(country_search_key, self.cache_duration_seconds)
+                
+                # Add to country-specific search index
+                self.redis_client.sadd(f"{country}:active_searches", cache_key)
             
-            # Save search results metadata
-            search_metadata = {
-                'cache_key': cache_key,
-                'job_ids': json.dumps(saved_job_ids),
-                'job_count': len(saved_job_ids),
-                'metadata': json.dumps(metadata or {}),
-                'created_at': datetime.now().isoformat(),
-                'expires_at': (datetime.now() + timedelta(seconds=self.cache_duration_seconds)).isoformat()
-            }
-            
-            # Store search metadata
-            self.redis_client.hset(f"search:{cache_key}", mapping=search_metadata)
-            self.redis_client.expire(f"search:{cache_key}", self.cache_duration_seconds)
-            
-            # Add to search index for easy retrieval
-            self.redis_client.sadd("active_searches", cache_key)
-            
-            logger.info(f"Saved {len(saved_job_ids)} jobs to Redis cache with key: {cache_key}")
+            logger.info(f"Saved {len(saved_job_ids)} jobs to Redis cache across {len(country_jobs)} countries")
             return True
             
         except Exception as e:
