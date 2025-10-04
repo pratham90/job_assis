@@ -32,10 +32,11 @@ console.log('  API_BASE_URL:', API_BASE_URL);
 // API utility functions
 export const api = {
   // Get job recommendations for a user
-  async getRecommendations(clerkId: string, limit: number = 10, location?: string) {
-    const locParam = location ? `&location=${encodeURIComponent(location)}` : '';
+  async getRecommendations(clerkId: string, limit: number = 10, location: string = 'All Locations') {
+    const locParam = `&location=${encodeURIComponent(location)}`;
     const url = `${API_BASE_URL}/api/recommend/${clerkId}?limit=${limit}${locParam}`;
     console.log('📡 Fetching recommendations from:', url);
+    console.log('📍 Location parameter:', location);
     
     const response = await fetch(url);
     console.log('📊 Response status:', response.status, response.statusText);
@@ -81,13 +82,39 @@ export const api = {
   },
 
   async removeSavedJob(userId: string, jobId: string) {
-    const response = await fetch(`${API_BASE_URL}/api/recommend/saved/remove`, {
+    const url = `${API_BASE_URL}/api/recommend/saved/remove`;
+    console.log('🗑️  Removing saved job from:', url);
+    console.log('   User ID:', userId);
+    console.log('   Job ID:', jobId);
+    
+    const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ user_id: userId, job_id: jobId }),
     });
-    if (!response.ok) throw new Error(`Failed to remove saved job: ${response.statusText}`);
-    return response.json();
+    
+    console.log('📊 Remove response status:', response.status, response.statusText);
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('❌ Remove saved job error:', errorText);
+      throw new Error(`Failed to remove saved job: ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    console.log('✅ Remove saved job response:', data);
+    return data;
+  },
+
+  // Liked jobs APIs
+  async getLikedJobs(clerkId: string) {
+    const url = `${API_BASE_URL}/api/recommend/liked/${clerkId}`;
+    console.log('💚 Fetching liked jobs from:', url);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Failed to fetch liked jobs: ${response.statusText}`);
+    const data = await response.json();
+    console.log('✅ Liked jobs received:', data?.length || 0);
+    return data;
   },
 
   // Create a new user

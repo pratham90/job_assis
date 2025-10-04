@@ -23,7 +23,16 @@ app.add_middleware(
 async def startup_event():
     logger.info("🚀 Starting Job Recommender API...")
     logger.info("📊 Database connections initialized")
+    
+    # Create unique indexes to prevent duplicate job actions
+    try:
+        await db.ensure_indexes()
+        logger.info("✅ Database indexes ensured")
+    except Exception as e:
+        logger.warning(f"⚠️  Index creation warning: {e}")
+    
     logger.info("🔗 API endpoints registered")
+    logger.info("✨ Job Recommender API is ready!")
 
 @app.get("/")
 async def root():

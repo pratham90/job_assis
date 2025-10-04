@@ -82,20 +82,35 @@ const SavedJobs = () => {
   };
 
   const handleUnsaveJob = (jobId: string) => {
-    Alert.alert(
-      "Remove Job",
-      "Are you sure you want to remove this job from your saved list?",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Remove",
-          style: "destructive",
-          onPress: () => {
-            removeJob(jobId);
+    console.log('🗑️  Unsave button clicked for job:', jobId);
+    
+    // For web, use window.confirm instead of Alert.alert
+    if (typeof window !== 'undefined' && window.confirm) {
+      const confirmed = window.confirm('Are you sure you want to remove this job from your saved list?');
+      if (confirmed) {
+        console.log('✅ User confirmed removal for job:', jobId);
+        removeJob(jobId);
+      } else {
+        console.log('❌ User cancelled removal');
+      }
+    } else {
+      // Fallback for mobile
+      Alert.alert(
+        "Remove Job",
+        "Are you sure you want to remove this job from your saved list?",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Remove",
+            style: "destructive",
+            onPress: () => {
+              console.log('✅ User confirmed removal for job:', jobId);
+              removeJob(jobId);
+            },
           },
-        },
-      ]
-    );
+        ]
+      );
+    }
   };
 
   const handleApply = (job: Job) => {
@@ -142,7 +157,6 @@ const SavedJobs = () => {
 
   const renderJobCard = (job: Job) => (
     <TouchableOpacity
-      key={job.id || job._id}
       style={styles.jobCard}
       onPress={() => handleJobPress(job)}
       activeOpacity={0.7}
@@ -171,7 +185,13 @@ const SavedJobs = () => {
           </View>
           <TouchableOpacity
             style={styles.unsaveButton}
-          onPress={() => handleUnsaveJob(job.id || job._id)}
+            onPress={() => {
+              const jobId = job.id || job._id;
+              console.log('📌 Red bookmark clicked!');
+              console.log('   Job ID:', jobId);
+              console.log('   Job title:', job.title);
+              handleUnsaveJob(jobId);
+            }}
           >
             <Ionicons name="bookmark" size={20} color="#ef4444" />
           </TouchableOpacity>
@@ -374,11 +394,16 @@ const SavedJobs = () => {
             />
           }
         >
-          {savedJobs.map(job => (
-            <React.Fragment key={job.id}>
-              {renderJobCard(job)}
-            </React.Fragment>
-          ))}
+          {savedJobs
+            .filter((job, index, self) => 
+              // Remove duplicates by id or _id
+              index === self.findIndex(j => (j.id || j._id) === (job.id || job._id))
+            )
+            .map((job, index) => (
+              <React.Fragment key={`${job.id || job._id}-${index}`}>
+                {renderJobCard(job)}
+              </React.Fragment>
+            ))}
         </ScrollView>
       )}
 

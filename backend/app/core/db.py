@@ -27,9 +27,38 @@ class Database:
         self.users_db = self.mongo_client.users
         self.scraper = None
         
-        print(f"🔗 Database connections initialized:")
-        print(f"   - Redis: {redis_uri.split('@')[1] if '@' in redis_uri else 'localhost'}")
-        print(f"   - MongoDB: {mongo_uri.split('@')[1].split('/')[0] if '@' in mongo_uri else 'localhost'}")
+        logger.info("🔗 Database connections initialized:")
+        logger.info(f"   📦 Redis: {redis_uri.split('@')[1] if '@' in redis_uri else 'localhost'}")
+        logger.info(f"   🍃 MongoDB: {mongo_uri.split('@')[1].split('/')[0] if '@' in mongo_uri else 'localhost'}")
+    
+    async def ensure_indexes(self):
+        """Create unique indexes to prevent duplicate job actions"""
+        try:
+            # Create unique compound index on user_job_actions collection
+            # This ensures no duplicate (user_id, job_id, action) combinations
+            await self.users_db.user_job_actions.create_index(
+                [("user_id", 1), ("job_id", 1), ("action", 1)],
+                unique=True,
+                name="unique_user_job_action"
+            )
+            logger.info("   ✅ Unique compound index: (user_id, job_id, action)")
+            
+            # Create index on user_id for faster queries
+            await self.users_db.user_job_actions.create_index(
+                [("user_id", 1)],
+                name="user_id_index"
+            )
+            logger.info("   ✅ Index: user_id")
+            
+            # Create index on action for faster filtering
+            await self.users_db.user_job_actions.create_index(
+                [("action", 1)],
+                name="action_index"
+            )
+            logger.info("   ✅ Index: action")
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Index creation warning (indexes may already exist): {e}")
     
     def _initialize_scraper(self):
         """Initialize the web scraper only when needed"""
@@ -727,7 +756,7 @@ class Database:
 
     # ===== Saved/Liked jobs persistence in MongoDB =====
     async def save_user_job_action(self, user_id: str, job_id: str, action: str, job_snapshot: Optional[dict] = None) -> bool:
-        """Persist a user's job action (e.g., save/like) to MongoDB.
+        """Persist a user's job action (e.g., save/like/dislike) to MongoDB.
 
         Collection: users.user_job_actions
         Unique per (user_id, job_id, action)
@@ -735,29 +764,52 @@ class Database:
         try:
             collection = self.users_db.user_job_actions
             now = datetime.utcnow()
+            
+            logger.info(f"💾 Saving {action} action: user={user_id[:8]}..., job={job_id[:8]}...")
+            
             update_doc = {"$set": {"user_id": user_id, "job_id": job_id, "action": action, "updated_at": now},
                           "$setOnInsert": {"created_at": now}}
             if job_snapshot:
                 update_doc["$set"]["job_snapshot"] = job_snapshot
-            await collection.update_one(
+            
+            result = await collection.update_one(
                 {"user_id": user_id, "job_id": job_id, "action": action},
                 update_doc,
                 upsert=True,
             )
+            
+            if result.upserted_id:
+                logger.info(f"✅ New {action} saved (ID: {str(result.upserted_id)[:8]}...)")
+            elif result.modified_count > 0:
+                logger.info(f"✅ {action.capitalize()} updated")
+            else:
+                logger.debug(f"ℹ️  {action.capitalize()} already exists (no changes)")
+            
             return True
         except Exception as e:
-            logger.error(f"Failed to save user job action: {e}")
+            logger.error(f"❌ Failed to save user job action: {e}")
+            print(f"❌ Error details: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return False
 
     async def remove_saved_job(self, user_id: str, job_id: str) -> bool:
         """Remove a saved job document for a user."""
         try:
+            logger.info(f"🗑️  Removing saved job: user={user_id[:8]}..., job={job_id[:8]}...")
+            
             result = await self.users_db.user_job_actions.delete_one(
                 {"user_id": user_id, "job_id": job_id, "action": "save"}
             )
-            return result.deleted_count > 0
+            
+            if result.deleted_count > 0:
+                logger.info(f"✅ Saved job removed successfully")
+                return True
+            else:
+                logger.warning(f"⚠️  Saved job not found (may already be removed)")
+                return False
         except Exception as e:
-            logger.error(f"Failed to remove saved job: {e}")
+            logger.error(f"❌ Failed to remove saved job: {e}")
             return False
 
     async def get_user_saved_jobs(self, user_id: str) -> List[dict]:
@@ -782,6 +834,54 @@ class Database:
             return results
         except Exception as e:
             logger.error(f"Failed to fetch saved jobs: {e}")
+            return []
+
+    async def get_user_liked_jobs(self, user_id: str) -> List[dict]:
+        """Return liked jobs with enriched job data when available."""
+        try:
+            cursor = self.users_db.user_job_actions.find({"user_id": user_id, "action": {"$in": ["like", "super_like"]}})
+            items = [doc async for doc in cursor]
+            results: List[dict] = []
+            for doc in items:
+                jid = str(doc.get("job_id"))
+                job_data = await self.get_job_by_id(jid)
+                if job_data:
+                    # Normalize to JobPosting fields expected by frontend
+                    job_obj = self._convert_job_data(job_data)
+                    if job_obj:
+                        results.append(job_obj)
+                else:
+                    # Fallback to stored snapshot
+                    snapshot = doc.get("job_snapshot") or {}
+                    snapshot_id = snapshot.get("id") or snapshot.get("_id") or jid
+                    results.append({"id": str(snapshot_id), **snapshot})
+            return results
+        except Exception as e:
+            logger.error(f"Failed to fetch liked jobs: {e}")
+            return []
+
+    async def get_user_disliked_jobs(self, user_id: str) -> List[dict]:
+        """Return disliked jobs with enriched job data when available."""
+        try:
+            cursor = self.users_db.user_job_actions.find({"user_id": user_id, "action": "dislike"})
+            items = [doc async for doc in cursor]
+            results: List[dict] = []
+            for doc in items:
+                jid = str(doc.get("job_id"))
+                job_data = await self.get_job_by_id(jid)
+                if job_data:
+                    # Normalize to JobPosting fields expected by frontend
+                    job_obj = self._convert_job_data(job_data)
+                    if job_obj:
+                        results.append(job_obj)
+                else:
+                    # Fallback to stored snapshot
+                    snapshot = doc.get("job_snapshot") or {}
+                    snapshot_id = snapshot.get("id") or snapshot.get("_id") or jid
+                    results.append({"id": str(snapshot_id), **snapshot})
+            return results
+        except Exception as e:
+            logger.error(f"Failed to fetch disliked jobs: {e}")
             return []
 
     async def get_user_action_job_ids(self, user_id: str, actions: List[str]) -> List[str]:

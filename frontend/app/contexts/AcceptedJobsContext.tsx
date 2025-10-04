@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { getAcceptedJobs, saveAcceptedJob, removeAcceptedJob } from '../utils/acceptedJobsStorage';
+import { api } from '../utils/api';
 import { useUser } from '@clerk/clerk-expo';
 
 type Job = {
@@ -20,25 +20,30 @@ export const AcceptedJobsProvider: React.FC<{ children: React.ReactNode }> = ({ 
   const [acceptedJobs, setAcceptedJobs] = useState<Job[]>([]);
   const { user } = useUser();
 
-  // Get user key (clerkId or email)
-  const getUserKey = () => {
-    if (!user) return "default";
-    return user.id || user.primaryEmailAddress?.emailAddress || user.emailAddresses?.[0]?.emailAddress || "default";
-  };
-
   const refreshAcceptedJobs = async () => {
-    const userKey = getUserKey();
-    console.log('Refreshing accepted jobs for user key:', userKey);
-    const jobs = await getAcceptedJobs(userKey);
-    console.log('Retrieved accepted jobs count:', jobs?.length || 0);
-    setAcceptedJobs(jobs);
-    return jobs; // Return jobs for immediate use
+    if (!user?.id) {
+      console.log('No user authenticated, clearing jobs');
+      setAcceptedJobs([]);
+      return;
+    }
+    
+    try {
+      console.log('Fetching liked jobs from backend for user:', user.id);
+      const jobs = await api.getLikedJobs(user.id);
+      console.log('Retrieved liked jobs count:', jobs?.length || 0);
+      setAcceptedJobs(jobs);
+      return jobs;
+    } catch (error) {
+      console.error('Failed to fetch liked jobs:', error);
+      setAcceptedJobs([]);
+      return [];
+    }
   };
 
   useEffect(() => {
     console.log('AcceptedJobsProvider: User changed, refreshing jobs');
     if (user) {
-      console.log('User is authenticated, refreshing jobs');
+      console.log('User is authenticated, fetching liked jobs from backend');
       refreshAcceptedJobs();
     } else {
       console.log('No user authenticated, clearing jobs');
@@ -47,43 +52,38 @@ export const AcceptedJobsProvider: React.FC<{ children: React.ReactNode }> = ({ 
   }, [user]);
 
   const addAcceptedJob = async (job: Job) => {
-    const userKey = getUserKey();
-    console.log('Adding job to context:', job.id, 'for user:', userKey);
-    
-    // Add userKey to the job object
-    const jobWithUserKey = { ...job, userKey };
-    
-    // Save to storage
-    const saveResult = await saveAcceptedJob(jobWithUserKey);
-    
-    if (saveResult) {
-      console.log('Job saved successfully, updating state');
-      // Update local state immediately for better UX
-      // Check if job already exists for this user
-      const exists = acceptedJobs.some(j => j.id === job.id && j.userKey === userKey);
-      if (!exists) {
-        setAcceptedJobs(prev => [...prev, jobWithUserKey]);
-      }
-    } else {
-      console.log('Job not saved (likely duplicate)');
+    if (!user?.id) {
+      console.log('No user authenticated, cannot add job');
+      return;
     }
     
-    // Also refresh from storage to ensure consistency
-    await refreshAcceptedJobs();
+    console.log('Adding liked job to backend:', job.id, 'for user:', user.id);
+    
+    // The job is already sent to backend via handleSwipeAction in index.tsx
+    // Just update local state optimistically and refresh
+    const exists = acceptedJobs.some(j => j.id === job.id);
+    if (!exists) {
+      setAcceptedJobs(prev => [...prev, job]);
+    }
+    
+    // Refresh from backend to ensure consistency
+    setTimeout(() => refreshAcceptedJobs(), 500);
   };
 
   const removeAcceptedJobFn = async (jobId: string) => {
-    const userKey = getUserKey();
-    console.log('Removing job from context:', jobId, 'for user:', userKey);
+    if (!user?.id) {
+      console.log('No user authenticated, cannot remove job');
+      return;
+    }
     
-    // Remove from storage
-    await removeAcceptedJob(jobId, userKey);
+    console.log('Removing liked job from backend:', jobId, 'for user:', user.id);
     
     // Update local state immediately for better UX
     setAcceptedJobs(prev => prev.filter(job => job.id !== jobId));
     
-    // Also refresh from storage to ensure consistency
-    await refreshAcceptedJobs();
+    // Note: You may want to add a backend endpoint to remove liked jobs
+    // For now, just refresh to sync with backend
+    setTimeout(() => refreshAcceptedJobs(), 500);
   };
 
   return (

@@ -72,11 +72,18 @@ export const SavedJobsProvider = ({ children }: { children: ReactNode }) => {
 
   const removeJob = async (jobId: string) => {
     const userKey = getUserKey();
+    console.log('🔄 SavedJobsContext: removeJob called');
+    console.log('   User Key:', userKey);
+    console.log('   Job ID:', jobId);
     try {
+      console.log('📡 Calling API to remove saved job...');
       await api.removeSavedJob(userKey, jobId);
+      console.log('✅ API call successful, refreshing saved jobs list...');
       const jobs = await api.getSavedJobs(userKey);
+      console.log('✅ Refreshed saved jobs, count:', jobs?.length || 0);
       setSavedJobs(jobs || []);
     } catch (e) {
+      console.error('❌ Failed to remove saved job:', e);
       console.warn('Failed to remove saved job:', e);
     }
   };

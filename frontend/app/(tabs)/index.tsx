@@ -14,7 +14,6 @@ import {
   Text,
   TouchableOpacity,
   View,
-  TextInput,
 } from "react-native";
 import {
   GestureHandlerRootView,
@@ -240,7 +239,6 @@ export default function SeekerJobs() {
   const [allJobs, setAllJobs] = useState<Job[]>([]);
   const [userLocation, setUserLocation] = useState<string>("");
   const [isLocationLoading, setIsLocationLoading] = useState(false);
-  const [customLocation, setCustomLocation] = useState<string>("");
   const [isFetching, setIsFetching] = useState(false);
 
   // Periodically refresh recommendations so new backend results appear automatically
@@ -254,16 +252,8 @@ export default function SeekerJobs() {
 
   const locations = [
     "All Locations",
-    "Live Location",
-    "Remote",
-    "San Francisco, CA",
-    "New York, NY",
-    "Austin, TX",
-    "Seattle, WA",
-    "Los Angeles, CA",
-    "Chicago, IL",
-    "Boston, MA",
-    "Denver, CO",
+    "India",
+    "USA",
   ];
 
   const overlayOpacity = useSharedValue(1);
@@ -290,32 +280,7 @@ export default function SeekerJobs() {
   const [isAnimating, setIsAnimating] = useState(false);
   const { savedJobs, addJob, removeJob, isJobSaved } = useSavedJobs();
 
-  const filterJobsByLocation = (
-    location: string,
-    jobsToFilter?: Job[],
-    userLoc?: string
-  ) => {
-    const jobsData = jobsToFilter || allJobs;
-
-    if (location === "All Locations") {
-      setJobs(jobsData);
-    } else if (location === "Live Location" && userLoc) {
-      const filteredJobs = jobsData.filter(
-        (job) =>
-          job.location.toLowerCase().includes(userLoc.toLowerCase()) ||
-          job.location.toLowerCase().includes("remote")
-      );
-      setJobs(filteredJobs);
-    } else {
-      const filteredJobs = jobsData.filter(
-        (job) =>
-          job.location.toLowerCase().includes(location.toLowerCase()) ||
-          (location === "Remote" &&
-            job.location.toLowerCase().includes("remote"))
-      );
-      setJobs(filteredJobs);
-    }
-  };
+  // Location filtering is now done on the backend for better performance
 
   useEffect(() => {
     if (showOverlay) {
@@ -397,7 +362,13 @@ export default function SeekerJobs() {
       setError(null);
       
       // Use the new API utility function
-      const effectiveLocation = selectedLocation === 'All Locations' ? undefined : (selectedLocation === 'Live Location' ? userLocation || undefined : selectedLocation);
+      const effectiveLocation = selectedLocation === 'All Locations' 
+        ? 'All Locations' 
+        : selectedLocation;
+      
+      console.log('📍 Selected location:', selectedLocation);
+      console.log('📍 Effective location:', effectiveLocation);
+      
       const jobsData = await api.getRecommendations(clerkId, 20, effectiveLocation);
       // jobsData: [{ job: {...}, match_score: ... }, ...]
       const mappedJobs: Job[] = jobsData.map((item: any) => {
@@ -516,14 +487,7 @@ export default function SeekerJobs() {
       } catch {}
       setJobs(mappedJobs);
       setAllJobs(mappedJobs);
-      // Apply current selection immediately on newly fetched jobs
-      if (selectedLocation === "All Locations") {
-        filterJobsByLocation("All Locations", mappedJobs);
-      } else if (selectedLocation === "Live Location") {
-        filterJobsByLocation("Live Location", mappedJobs, userLocation || undefined);
-      } else {
-        filterJobsByLocation(selectedLocation, mappedJobs);
-      }
+      // Backend already filtered jobs by location
     } catch (err) {
       setError("Failed to load job applications. Please check your internet connection or try again later.");
       setJobs([]);
@@ -569,8 +533,10 @@ export default function SeekerJobs() {
           setUserLocation(locationString);
           setSelectedLocation("Live Location");
           setShowLocationModal(false);
-
-          filterJobsByLocation("Live Location", allJobs, locationString);
+          // Fetch fresh jobs for this location
+          if (user?.id) {
+            fetchJobs(user.id);
+          }
 
           Alert.alert(
             "Location Found! 📍",
@@ -588,7 +554,10 @@ export default function SeekerJobs() {
         setUserLocation(locationString);
         setSelectedLocation("Live Location");
         setShowLocationModal(false);
-        filterJobsByLocation("Live Location", allJobs, locationString);
+        // Fetch fresh jobs for this location
+        if (user?.id) {
+          fetchJobs(user.id);
+        }
 
         Alert.alert("Location Found! 📍", `Jobs filtered for your location`, [
           { text: "Great!", style: "default" },
@@ -625,17 +594,11 @@ export default function SeekerJobs() {
   };
 
   const handleLocationSelect = (location: string) => {
-    if (location === "Live Location") {
-      fetchLiveLocation();
-    } else {
-      setSelectedLocation(location);
-      setShowLocationModal(false);
-      // Fetch fresh recommendations for this location from backend
-      if (user?.id) {
-        fetchJobs(user.id);
-      } else {
-        filterJobsByLocation(location, allJobs);
-      }
+    setSelectedLocation(location);
+    setShowLocationModal(false);
+    // Fetch fresh recommendations for this location from backend
+    if (user?.id) {
+      fetchJobs(user.id);
     }
   };
 
@@ -737,20 +700,11 @@ export default function SeekerJobs() {
 
       Alert.alert(
         "Bookmarked! 🔖",
-        ` ${job.title} has been saved to your bookmarks.`
+        `${job.title} has been saved to your bookmarks.`
       );
     }
   };
 
-  const resetJobs = () => {
-    filterJobsByLocation(selectedLocation, allJobs);
-    setSwipedJobs([]);
-    setIsAnimating(false);
-    // Remove all saved jobs (if needed)
-    // If you want to clear bookmarks, you may need to expose a clearSavedJobs() in your SavedJobsContext
-    setShowOverlay(true);
-    overlayOpacity.value = 1;
-  };
 
   const overlayAnimatedStyle = useAnimatedStyle(() => ({
     opacity: overlayOpacity.value,
@@ -863,21 +817,9 @@ export default function SeekerJobs() {
               </Text>
               <Text style={styles.noJobsSubtitle}>
                 {selectedLocation === "All Locations"
-                  ? "You've reviewed all available positions"
-                  : selectedLocation === "Live Location" && userLocation
-                  ? `No jobs available in ${userLocation} right now`
-                  : `No jobs available in ${selectedLocation} right now`}
+                  ? "You've reviewed all available positions. Check back later for new opportunities!"
+                  : `No jobs available in ${selectedLocation} right now. Try selecting a different location.`}
               </Text>
-              <TouchableOpacity
-                style={styles.primaryButton}
-                onPress={resetJobs}
-              >
-                <Text style={styles.primaryButtonText}>
-                  {selectedLocation === "All Locations"
-                    ? "Start Over"
-                    : "Reset & Try Again"}
-                </Text>
-              </TouchableOpacity>
             </View>
           )}
         </View>
@@ -890,9 +832,7 @@ export default function SeekerJobs() {
             {selectedLocation !== "All Locations" && (
               <Text style={styles.jobCount}>
                 {jobs.length} job{jobs.length !== 1 ? "s" : ""} in{" "}
-                {selectedLocation === "Live Location" && userLocation
-                  ? userLocation
-                  : selectedLocation}
+                {selectedLocation}
               </Text>
             )}
 
@@ -925,34 +865,6 @@ export default function SeekerJobs() {
                 >
                   <Ionicons name="close" size={20} color="#6b7280" />
                 </TouchableOpacity>
-              </View>
-              {/* Custom location input */}
-              <View style={{ paddingHorizontal: 16, paddingBottom: 8 }}>
-                <View style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  backgroundColor: '#f3f4f6',
-                  borderRadius: 8,
-                  paddingHorizontal: 12,
-                  paddingVertical: 8,
-                }}>
-                  <Ionicons name="search" size={16} color="#6b7280" />
-                  <TextInput
-                    placeholder="Type a city, state or country"
-                    placeholderTextColor="#9ca3af"
-                    style={{ marginLeft: 8, flex: 1, color: '#111827' }}
-                    value={customLocation}
-                    onChangeText={setCustomLocation}
-                    onSubmitEditing={() => customLocation && handleLocationSelect(customLocation)}
-                    returnKeyType="search"
-                  />
-                  <TouchableOpacity
-                    onPress={() => customLocation && handleLocationSelect(customLocation)}
-                    style={{ marginLeft: 8 }}
-                  >
-                    <Text style={{ color: '#3b82f6', fontWeight: '600' }}>Apply</Text>
-                  </TouchableOpacity>
-                </View>
               </View>
               <ScrollView
                 style={styles.locationList}
