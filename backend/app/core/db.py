@@ -291,86 +291,58 @@ class Database:
             try:
                 print(f"\n🔄 STEP 2: Fetching cached jobs from Redis (need {remaining_needed} more)...")
                 
-                # Use simple cluster-based job retrieval
-                # Default behavior: Show jobs from both clusters (All Locations)
-                if location and location.lower() == "usa":
-                    # Get job IDs from USA cluster only
-                    usa_job_ids = await self.redis_client.smembers("cluster:usa:jobs")
-                    job_ids = [job_id.decode('utf-8') if isinstance(job_id, bytes) else job_id for job_id in usa_job_ids]
-                    cluster_info = "USA cluster"
-                elif location and location.lower() == "india":
-                    # Get job IDs from India cluster only
-                    india_job_ids = await self.redis_client.smembers("cluster:india:jobs")
-                    job_ids = [job_id.decode('utf-8') if isinstance(job_id, bytes) else job_id for job_id in india_job_ids]
-                    cluster_info = "India cluster"
-                else:
-                    # DEFAULT: Get job IDs from BOTH clusters (All Locations/No filter)
-                    usa_job_ids = await self.redis_client.smembers("cluster:usa:jobs")
-                    india_job_ids = await self.redis_client.smembers("cluster:india:jobs")
-                    
-                    # Combine both clusters
-                    all_job_ids = list(usa_job_ids) + list(india_job_ids)
-                    job_ids = [job_id.decode('utf-8') if isinstance(job_id, bytes) else job_id for job_id in all_job_ids]
-                    cluster_info = f"All Locations - Combined clusters (USA: {len(usa_job_ids)}, India: {len(india_job_ids)})"
-                scraped_count = 0
+                # Determine which cluster to fetch from based on location
+                cluster_name = None
+                job_ids = []
                 
-                print(f"📊 Found {len(job_ids)} cached job IDs from {cluster_info}")
+                if location and location.strip():
+                    location_lower = location.lower()
+                    
+                    # Map location to cluster name
+                    if location_lower == "usa" or any(keyword in location_lower for keyword in ['united states', 'us', 'california', 'new york', 'texas']):
+                        cluster_name = "usa"
+                    elif location_lower == "india" or any(keyword in location_lower for keyword in ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru']):
+                        cluster_name = "india"
+                    elif location_lower in ["all locations", "all", "global"]:
+                        cluster_name = "global"
+                    else:
+                        # Try to match with available clusters or default to global
+                        cluster_name = "global"
+                else:
+                    # Default to global cluster if no location specified
+                    cluster_name = "global"
+                
+                # Fetch job IDs from the appropriate cluster
+                # Structure: cluster -> {cluster_name} -> jobs (SET)
+                cluster_key = f"cluster:{cluster_name}:jobs"
+                print(f"📍 Fetching from Redis key: {cluster_key}")
+                
+                # Use SMEMBERS to get all job IDs from the SET
+                cluster_job_ids = await self.redis_client.smembers(cluster_key)
+                job_ids = [job_id.decode('utf-8') if isinstance(job_id, bytes) else job_id for job_id in cluster_job_ids]
+                
+                print(f"📊 Found {len(job_ids)} job IDs in '{cluster_name}' cluster")
+                
+                # Fallback: If no jobs found in specific cluster, try global cluster
+                if len(job_ids) == 0 and cluster_name != "global":
+                    print(f"⚠️ No jobs in {cluster_name} cluster, falling back to global cluster")
+                    cluster_key = "cluster:global:jobs"
+                    cluster_job_ids = await self.redis_client.smembers(cluster_key)
+                    job_ids = [job_id.decode('utf-8') if isinstance(job_id, bytes) else job_id for job_id in cluster_job_ids]
+                    print(f"📊 Found {len(job_ids)} job IDs in global cluster (fallback)")
                 
                 # LOOP PREVENTION: Limit the jobs we process
-                max_jobs_to_process = min(len(job_ids), remaining_needed * 3, 200)  # Cap at 200
+                max_jobs_to_process = min(len(job_ids), remaining_needed * 3, 200)
                 
+                scraped_count = 0
                 for job_id in job_ids[:max_jobs_to_process]:
                     job_data = await self.redis_client.hgetall(f"job:{job_id}")
                     if job_data:
-                        # Convert Redis job first
+                        # Convert Redis job
                         converted_job = self._convert_scraped_job(job_data)
                         
                         if converted_job:
-                            # Apply location filtering to Redis jobs
-                            if location and location.strip() and location.lower() not in ["all locations", "all"]:
-                                location_lower = location.lower()
-                                
-                                # Handle location data format (could be dict or string)
-                                job_location_raw = converted_job.get('location', '')
-                                if isinstance(job_location_raw, dict):
-                                    # Extract location string from dict
-                                    parts = [
-                                        str(job_location_raw.get('city', '')),
-                                        str(job_location_raw.get('state', '')),
-                                        str(job_location_raw.get('country', ''))
-                                    ]
-                                    job_location = ' '.join(parts).lower()
-                                else:
-                                    job_location = str(job_location_raw).lower()
-                                
-                                # Enhanced location matching for USA and India
-                                if location_lower == "usa":
-                                    usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
-                                                  'texas', 'washington', 'massachusetts', 'illinois', 'colorado',
-                                                  ', ca', ', ny', ', tx', 'san francisco', 'los angeles', 'seattle']
-                                    if not any(keyword in job_location for keyword in usa_keywords):
-                                        continue  # Skip this job
-                                    # Exclude jobs that also contain India keywords
-                                    india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
-                                                    'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
-                                    if any(india_keyword in job_location for india_keyword in india_keywords):
-                                        continue  # Skip this job
-                                elif location_lower == "india":
-                                    india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
-                                                    'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
-                                    if not any(keyword in job_location for keyword in india_keywords):
-                                        continue  # Skip this job
-                                    # Exclude jobs that also contain USA keywords
-                                    usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
-                                                  'texas', 'washington', 'massachusetts', 'illinois', 'colorado']
-                                    if any(usa_keyword in job_location for usa_keyword in usa_keywords):
-                                        continue  # Skip this job
-                                else:
-                                    # Generic location matching
-                                    if location_lower not in job_location and "remote" not in job_location:
-                                        continue  # Skip this job
-                            
-                            # Job passed location filter, add it
+                            # Add the job without additional location filtering since cluster already filtered it
                             converted_job["source"] = "scraped"
                             converted_job["priority"] = 0.7
                             all_jobs.append(converted_job)
@@ -379,7 +351,7 @@ class Database:
                             if scraped_count >= remaining_needed:
                                 break
                 
-                print(f"✅ Successfully processed {scraped_count} cached Redis jobs")
+                print(f"✅ Successfully processed {scraped_count} cached Redis jobs from {cluster_name} cluster")
                 
             except Exception as e:
                 print(f"❌ Error fetching cached jobs from Redis: {e}")
