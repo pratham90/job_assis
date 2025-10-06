@@ -375,8 +375,41 @@ class Database:
                 cluster_name = None
                 job_ids = []
                 
-<<<<<<< HEAD
-                print(f"📊 Found {len(job_ids)} cached job IDs from {cluster_info}")
+                if location and location.strip():
+                    location_lower = location.lower()
+                    
+                    # Map location to cluster name
+                    if location_lower == "usa" or any(keyword in location_lower for keyword in ['united states', 'us', 'california', 'new york', 'texas']):
+                        cluster_name = "usa"
+                    elif location_lower == "india" or any(keyword in location_lower for keyword in ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru']):
+                        cluster_name = "india"
+                    elif location_lower in ["all locations", "all", "global"]:
+                        cluster_name = "global"
+                    else:
+                        # Try to match with available clusters or default to global
+                        cluster_name = "global"
+                else:
+                    # Default to global cluster if no location specified
+                    cluster_name = "global"
+                
+                # Fetch job IDs from the appropriate cluster
+                cluster_key = f"cluster:{cluster_name}:jobs"
+                print(f"📍 Fetching from Redis key: {cluster_key}")
+                
+                # Use SMEMBERS to get all job IDs from the SET
+                cluster_job_ids = await self.redis_client.smembers(cluster_key)
+                job_ids = [job_id.decode('utf-8') if isinstance(job_id, bytes) else job_id for job_id in cluster_job_ids]
+                
+                print(f"📊 Found {len(job_ids)} job IDs in '{cluster_name}' cluster")
+                
+                # Fallback: If no jobs found in specific cluster, try global cluster
+                if len(job_ids) == 0 and cluster_name != "global":
+                    print(f"⚠️ No jobs in {cluster_name} cluster, falling back to global cluster")
+                    cluster_key = "cluster:global:jobs"
+                    cluster_job_ids = await self.redis_client.smembers(cluster_key)
+                    job_ids = [job_id.decode('utf-8') if isinstance(job_id, bytes) else job_id for job_id in cluster_job_ids]
+                    print(f"📊 Found {len(job_ids)} job IDs in global cluster (fallback)")
+                
                 print(f"🎯 Need {remaining_needed} more jobs to reach limit of {limit}")
                 
                 # OPTIMIZATION: Respect the limit - only process what we actually need
@@ -424,53 +457,6 @@ class Database:
                             continue
                             
                         job_id = job_data.get('job_id', '')
-=======
-                if location and location.strip():
-                    location_lower = location.lower()
-                    
-                    # Map location to cluster name
-                    if location_lower == "usa" or any(keyword in location_lower for keyword in ['united states', 'us', 'california', 'new york', 'texas']):
-                        cluster_name = "usa"
-                    elif location_lower == "india" or any(keyword in location_lower for keyword in ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru']):
-                        cluster_name = "india"
-                    elif location_lower in ["all locations", "all", "global"]:
-                        cluster_name = "global"
-                    else:
-                        # Try to match with available clusters or default to global
-                        cluster_name = "global"
-                else:
-                    # Default to global cluster if no location specified
-                    cluster_name = "global"
-                
-                # Fetch job IDs from the appropriate cluster
-                # Structure: cluster -> {cluster_name} -> jobs (SET)
-                cluster_key = f"cluster:{cluster_name}:jobs"
-                print(f"📍 Fetching from Redis key: {cluster_key}")
-                
-                # Use SMEMBERS to get all job IDs from the SET
-                cluster_job_ids = await self.redis_client.smembers(cluster_key)
-                job_ids = [job_id.decode('utf-8') if isinstance(job_id, bytes) else job_id for job_id in cluster_job_ids]
-                
-                print(f"📊 Found {len(job_ids)} job IDs in '{cluster_name}' cluster")
-                
-                # Fallback: If no jobs found in specific cluster, try global cluster
-                if len(job_ids) == 0 and cluster_name != "global":
-                    print(f"⚠️ No jobs in {cluster_name} cluster, falling back to global cluster")
-                    cluster_key = "cluster:global:jobs"
-                    cluster_job_ids = await self.redis_client.smembers(cluster_key)
-                    job_ids = [job_id.decode('utf-8') if isinstance(job_id, bytes) else job_id for job_id in cluster_job_ids]
-                    print(f"📊 Found {len(job_ids)} job IDs in global cluster (fallback)")
-                
-                # LOOP PREVENTION: Limit the jobs we process
-                max_jobs_to_process = min(len(job_ids), remaining_needed * 3, 200)
-                
-                scraped_count = 0
-                for job_id in job_ids[:max_jobs_to_process]:
-                    job_data = await self.redis_client.hgetall(f"job:{job_id}")
-                    if job_data:
-                        # Convert Redis job
-                        converted_job = self._convert_scraped_job(job_data)
->>>>>>> 874fc96dd388dab82bb16d521bad8171016e454a
                         
                         # Thread-safe duplicate check
                         with seen_job_ids_lock:
@@ -481,7 +467,6 @@ class Database:
                         # Convert Redis job
                         converted_job = self._convert_scraped_job(job_data)
                         if converted_job:
-<<<<<<< HEAD
                             batch_results.append(converted_job)
                     
                     return batch_results
@@ -570,16 +555,6 @@ class Database:
                 
                 print(f"✅ Location filter: '{location}' - Applied filtering")
                 print(f"📊 Processed {len(processed_jobs)} jobs → {len(filtered_jobs)} passed location filter")
-=======
-                            # Add the job without additional location filtering since cluster already filtered it
-                            converted_job["source"] = "scraped"
-                            converted_job["priority"] = 0.7
-                            all_jobs.append(converted_job)
-                            scraped_count += 1
-                            
-                            if scraped_count >= remaining_needed:
-                                break
->>>>>>> 874fc96dd388dab82bb16d521bad8171016e454a
                 
                 print(f"✅ Successfully processed {scraped_count} cached Redis jobs from {cluster_name} cluster")
                 
