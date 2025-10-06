@@ -696,65 +696,48 @@ class RedisJobDataCache:
             if 'job_id' not in job_data:
                 job_id_source = f"{job_data.get('title', '')}{job_data.get('company', '')}{job_data.get('location', '')}"
                 job_data['job_id'] = hashlib.md5(job_id_source.encode()).hexdigest()[:12]
-            
+
             job_id = job_data['job_id']
-            
-            # SIMPLIFIED: Only create 2 clusters - USA and India
             location = job_data.get('location', '').lower()
-            country = 'global'  # Default for other countries
-            
-            # Check for USA (including all US states)
-            usa_keywords = ['usa', 'us', 'united states', 'california', 'new york', 'texas', 'washington', 
-                          'massachusetts', 'georgia', 'pennsylvania', 'illinois', 'colorado', 'florida',
-                          'arizona', 'nevada', 'oregon', 'utah', 'idaho', 'montana', 'wyoming',
-                          'north dakota', 'south dakota', 'nebraska', 'kansas', 'oklahoma', 'arkansas',
-                          'louisiana', 'mississippi', 'alabama', 'tennessee', 'kentucky', 'indiana',
-                          'ohio', 'michigan', 'wisconsin', 'minnesota', 'iowa', 'missouri', 'alaska',
-                          'hawaii', 'vermont', 'new hampshire', 'maine', 'rhode island', 'connecticut',
-                          'new jersey', 'delaware', 'maryland', 'virginia', 'west virginia', 'north carolina',
-                          'south carolina', 'san francisco', 'los angeles', 'seattle', 'chicago', 'boston',
-                          'atlanta', 'philadelphia', 'denver', 'miami', 'phoenix', 'las vegas', 'portland',
-                          'salt lake city', 'boise', 'billings', 'cheyenne', 'fargo', 'rapid city',
-                          'omaha', 'wichita', 'oklahoma city', 'little rock', 'new orleans', 'jackson',
-                          'birmingham', 'nashville', 'louisville', 'indianapolis', 'columbus', 'detroit',
-                          'milwaukee', 'minneapolis', 'des moines', 'kansas city', 'anchorage', 'honolulu',
-                          'burlington', 'concord', 'augusta', 'providence', 'hartford', 'trenton',
-                          'dover', 'annapolis', 'richmond', 'charleston', 'raleigh', 'columbia']
-            
+
+            # Determine country clusters (can be multiple)
+            clusters = []
+
+            # Check for USA
+            usa_keywords = ['usa', 'us', 'united states', 'california', 'new york', 'texas',
+                           'washington', 'massachusetts', 'illinois', 'colorado', 'florida',
+                           'san francisco', 'los angeles', 'seattle', 'chicago', 'boston',
+                           'atlanta', 'denver', 'miami', 'phoenix', 'remote']
+
             # Check for India
-            india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 'hyderabad', 
-                            'chennai', 'pune', 'kolkata', 'ahmedabad', 'gurgaon', 'noida', 'kochi',
-                            'chandigarh', 'indore', 'bhopal', 'jaipur', 'lucknow', 'kanpur', 'nagpur',
-                            'visakhapatnam', 'coimbatore', 'madurai', 'rajkot', 'varanasi', 'srinagar',
-                            'amritsar', 'ludhiana', 'agra', 'nashik', 'faridabad', 'meerut', 'rajkot',
-                            'kalyan', 'vasai', 'vijayawada', 'jodhpur', 'madurai', 'ranchi', 'howrah',
-                            'coimbatore', 'raipur', 'jabalpur', 'gwalior', 'bhubaneswar', 'mysore',
-                            'tiruchirappalli', 'bhubaneshwar', 'salem', 'warangal', 'guntur', 'bhiwandi',
-                            'amravati', 'nanded', 'kolhapur', 'sangli', 'malegaon', 'ulhasnagar',
-                            'jalgaon', 'akola', 'latur', 'ahmednagar', 'chandrapur', 'parbhani', 'ichalkaranji',
-                            'jalna', 'bhusawal', 'ambajogai', 'yavatmal', 'kamptee', 'gondia', 'barsi',
-                            'achalpur', 'osmanabad', 'nandurbar', 'wardha', 'udgir', 'aurangabad']
-            
+            india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru',
+                             'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad',
+                             'gurgaon', 'noida', 'kochi']
+
             if any(keyword in location for keyword in usa_keywords):
-                country = 'usa'
-            elif any(keyword in location for keyword in india_keywords):
-                country = 'india'
-            
-            # Create cluster-based storage system
-            # Store job data with simple key
-            redis_key = f"job:{job_id}"
-            
-            # Add job to country-specific cluster
-            cluster_key = f"cluster:{country}:jobs"
+                clusters.append('usa')
+
+            if any(keyword in location for keyword in india_keywords):
+                clusters.append('india')
+
+            # Always add to global cluster
+            clusters.append('global')
+
+            # If no specific cluster matched, ensure it's in global
+            if len(clusters) == 1:  # Only 'global'
+                country = 'global'
+            else:
+                country = clusters[0] if clusters[0] != 'global' else clusters[1]
 
             # Prepare job fields for Redis Hash
+            redis_key = f"job:{job_id}"
             redis_fields = {
                 'title': job_data.get('title', ''),
                 'company': job_data.get('company', ''),
                 'skills': json.dumps(job_data.get('skills', [])),
                 'salary': job_data.get('salary', ''),
                 'location': job_data.get('location', ''),
-                'country': country,  # Add country field
+                'country': country,
                 'job_type': job_data.get('job_type', ''),
                 'experience_level': job_data.get('experience_level', ''),
                 'category': job_data.get('category', ''),
@@ -769,17 +752,23 @@ class RedisJobDataCache:
                 'created_at': datetime.now().isoformat(),
                 'expires_at': (datetime.now() + timedelta(seconds=self.cache_duration_seconds)).isoformat()
             }
-            
+
             # Save job data to Redis Hash
             self.redis_client.hset(redis_key, mapping=redis_fields)
             self.redis_client.expire(redis_key, self.cache_duration_seconds)
-            
-            # Add job ID to country-specific cluster only
-            self.redis_client.sadd(cluster_key, job_id)
-            self.redis_client.expire(cluster_key, self.cache_duration_seconds)
-            
+
+            # Add job ID to ALL relevant clusters
+            for cluster in clusters:
+                cluster_key = f"cluster:{cluster}:jobs"
+                self.redis_client.sadd(cluster_key, job_id)
+
+                # Only set expire if cluster is new (check if it exists first)
+                if self.redis_client.ttl(cluster_key) == -1:
+                    self.redis_client.expire(cluster_key, self.cache_duration_seconds)
+
+            logger.info(f"Saved job {job_id} to clusters: {', '.join(clusters)}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Error saving job to Redis: {str(e)}")
             return False
