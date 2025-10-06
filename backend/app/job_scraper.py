@@ -1,8 +1,3 @@
-"""
-job_scraper.py - Complete Job Scraper with Redis Caching
-This file integrates your actual LinkedInJobScraper and RedisJobDataCache
-"""
-
 import requests
 import json
 import time
@@ -14,6 +9,8 @@ import logging
 import redis
 import hashlib
 from datetime import datetime, timedelta
+import asyncio
+import concurrent.futures
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -737,8 +734,12 @@ class RedisJobDataCache:
             
             if any(keyword in location for keyword in usa_keywords):
                 country = 'usa'
+                print(f"🇺🇸 Job '{job_data.get('title', '')}' detected as USA job (location: '{location}')")
             elif any(keyword in location for keyword in india_keywords):
                 country = 'india'
+                print(f"🇮🇳 Job '{job_data.get('title', '')}' detected as India job (location: '{location}')")
+            else:
+                print(f"🌍 Job '{job_data.get('title', '')}' detected as global job (location: '{location}')")
             
             # Create cluster-based storage system
             # Store job data with simple key
@@ -770,13 +771,23 @@ class RedisJobDataCache:
                 'expires_at': (datetime.now() + timedelta(seconds=self.cache_duration_seconds)).isoformat()
             }
             
+            # Concurrent Redis operations with connection pooling
+            
+            # Use connection pool for concurrent operations
+            pipeline = self.redis_client.pipeline()
+            
             # Save job data to Redis Hash
-            self.redis_client.hset(redis_key, mapping=redis_fields)
-            self.redis_client.expire(redis_key, self.cache_duration_seconds)
+            pipeline.hset(redis_key, mapping=redis_fields)
+            pipeline.expire(redis_key, self.cache_duration_seconds)
             
             # Add job ID to country-specific cluster only
-            self.redis_client.sadd(cluster_key, job_id)
-            self.redis_client.expire(cluster_key, self.cache_duration_seconds)
+            pipeline.sadd(cluster_key, job_id)
+            pipeline.expire(cluster_key, self.cache_duration_seconds)
+            
+            print(f"📦 Adding job '{job_data.get('title', '')}' to cluster: {cluster_key}")
+            
+            # Execute all operations in one batch with timeout
+            pipeline.execute()
             
             return True
             

@@ -1,0 +1,16 @@
+# Vercel Environment Variables
+# Add these in your Vercel dashboard under Settings > Environment Variables
+
+# MongoDB Connection
+MONGODB_URI=mongodb+srv://Jobs:Jobs-provider@jobs.2m8l8hb.mongodb.net
+MONGO_URI=mongodb+srv://Jobs:Jobs-provider@jobs.2m8l8hb.mongodb.net
+
+# Redis Connection
+REDIS_URI=redis://default:liiSkjZQkhWPULcAcQ2dV0MZzy82wj2B@redis-13364.c56.east-us.azure.redns.redis-cloud.com:13364/0
+
+# Clerk Authentication (if using)
+CLERK_SECRET_KEY=your_clerk_secret_key_here
+CLERK_PUBLISHABLE_KEY=your_clerk_publishable_key_here
+
+# Optional: Custom domain
+VERCEL_URL=your-app-name.vercel.app

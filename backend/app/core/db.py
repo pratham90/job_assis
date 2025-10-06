@@ -1,5 +1,3 @@
-# app/core/db.py - COMPLETE FIXED VERSION
-
 from typing import List, Optional
 from bson import ObjectId
 import os
@@ -10,6 +8,12 @@ from dotenv import load_dotenv
 import logging
 from datetime import datetime
 import re
+import asyncio
+import concurrent.futures
+import threading
+import time
+from functools import lru_cache
+import weakref
 
 logger = logging.getLogger(__name__)
 
@@ -19,17 +23,92 @@ mongo_uri = os.getenv("MONGO_URI", "mongodb+srv://Jobs:Jobs-provider@jobs.2m8l8h
 
 class Database:
     def __init__(self):
-        self.redis_client = redis.from_url(redis_uri, decode_responses=True)
-        self.mongo_client = AsyncIOMotorClient(mongo_uri)
+        # Vercel-optimized connection settings for serverless
+        self.redis_client = redis.from_url(
+            redis_uri, 
+            decode_responses=True,
+            max_connections=10,  # Reduced for serverless
+            retry_on_timeout=True,
+            socket_keepalive=False,  # Disabled for serverless
+            socket_keepalive_options={},
+            health_check_interval=0  # Disabled for serverless
+        )
+        
+        # Serverless-optimized MongoDB connection
+        self.mongo_client = AsyncIOMotorClient(
+            mongo_uri,
+            maxPoolSize=10,  # Reduced for serverless
+            minPoolSize=1,  # Minimum for serverless
+            maxIdleTimeMS=10000,  # 10 seconds (shorter for serverless)
+            serverSelectionTimeoutMS=3000,  # 3 seconds
+            connectTimeoutMS=5000,  # 5 seconds
+            socketTimeoutMS=10000,  # 10 seconds
+            retryWrites=True,
+            retryReads=True
+        )
+        
         # Use the Jobs database for jobs
         self.mongo_db = self.mongo_client.Jobs
         # Connect to users database for user profiles and skills
         self.users_db = self.mongo_client.users
         self.scraper = None
         
-        logger.info("🔗 Database connections initialized:")
+        # Serverless-optimized performance settings
+        self._cache = {}  # Simple in-memory cache
+        self._cache_lock = threading.RLock()
+        self._cache_ttl = 300  # 5 minutes TTL
+        
+        # Reduced thread pool for serverless environment
+        self._thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        
+        logger.info("🔗 Vercel-optimized database connections initialized:")
         logger.info(f"   📦 Redis: {redis_uri.split('@')[1] if '@' in redis_uri else 'localhost'}")
-        logger.info(f"   🍃 MongoDB: {mongo_uri.split('@')[1].split('/')[0] if '@' in mongo_uri else 'localhost'}")
+        logger.info(f"   🍃 MongoDB: Serverless-optimized connection pooling")
+        logger.info(f"   🧵 Thread pool: 2 workers (serverless)")
+        logger.info(f"   💾 Cache: In-memory with 5min TTL")
+        logger.info(f"   🚀 Environment: Vercel serverless")
+    
+    def _get_cache_key(self, prefix: str, *args) -> str:
+        """Generate cache key from prefix and arguments"""
+        return f"{prefix}:{':'.join(str(arg) for arg in args)}"
+    
+    def _get_from_cache(self, key: str):
+        """Get value from cache with TTL check"""
+        with self._cache_lock:
+            if key in self._cache:
+                value, timestamp = self._cache[key]
+                if time.time() - timestamp < self._cache_ttl:
+                    return value
+                else:
+                    del self._cache[key]
+            return None
+    
+    def _set_cache(self, key: str, value):
+        """Set value in cache with timestamp"""
+        with self._cache_lock:
+            self._cache[key] = (value, time.time())
+    
+    def _clear_cache(self):
+        """Clear all cached data"""
+        with self._cache_lock:
+            self._cache.clear()
+    
+    async def get_user_by_clerk_id_cached(self, clerk_id: str) -> Optional[dict]:
+        """Get user by clerk ID with caching"""
+        cache_key = self._get_cache_key("user", clerk_id)
+        cached_user = self._get_from_cache(cache_key)
+        
+        if cached_user is not None:
+            logger.debug(f"📋 Cache hit for user: {clerk_id[:8]}...")
+            return cached_user
+        
+        # Cache miss - fetch from database
+        user = await self.get_user_by_clerk_id(clerk_id)
+        if user:
+            self._set_cache(cache_key, user)
+            logger.debug(f"📋 Cache miss - stored user: {clerk_id[:8]}...")
+        
+        return user
     
     async def ensure_indexes(self):
         """Create unique indexes to prevent duplicate job actions"""
@@ -182,54 +261,43 @@ class Database:
     async def get_user_by_clerk_id(self, clerk_id: str) -> Optional[dict]:
         """Get user by Clerk ID from users/Profile collection"""
         try:
-            print(f"🔍 Searching for user with clerk_id: {clerk_id}")
-            print(f"🔍 Database: {self.users_db.name}")
-            print(f"🔍 Collection: Profile")
+            logger.debug(f"Searching for user with clerk_id: {clerk_id}")
             
             # Get user profile with skills from users/Profile collection
             profile_data = await self.users_db.Profile.find_one({"clerk_id": clerk_id})
             if profile_data:
-                print(f"✅ Profile found with skills: {profile_data.get('skills', [])}")
+                logger.info(f"Profile found with skills: {profile_data.get('skills', [])}")
                 profile_data["_id"] = str(profile_data["_id"])
                 return profile_data
             else:
-                print(f"❌ User with clerk_id '{clerk_id}' not found in users/Profile collection")
-                
-                # Debug: Check if there are any users in the Profile collection
-                total_profiles = await self.users_db.Profile.count_documents({})
-                print(f"📊 Total profiles in users/Profile: {total_profiles}")
-                
-                # Debug: List all clerk_ids in Profile collection
-                all_profiles = await self.users_db.Profile.find({}, {"clerk_id": 1}).to_list(10)
-                print(f"📋 Sample clerk_ids in Profile: {[p.get('clerk_id') for p in all_profiles]}")
-                
+                logger.warning(f"User with clerk_id '{clerk_id}' not found")
                 return None
                 
         except Exception as e:
-            print(f"💥 Error fetching user from MongoDB: {e}")
+            logger.error(f"Error fetching user from MongoDB: {e}")
             return None
     
     async def create_user(self, user_data: dict) -> Optional[str]:
         """Create a new user in users/Profile collection"""
         try:
-            print(f"📝 Creating user in users/Profile collection...")
-            print(f"📝 User data: {user_data}")
+            logger.info("Creating user in users/Profile collection")
+            logger.debug(f"User data: {user_data}")
             
             # Store user in users/Profile collection
             result = await self.users_db.Profile.insert_one(user_data)
             user_id = str(result.inserted_id)
-            print(f"✅ User created in users/Profile with ID: {user_id}")
+            logger.info(f"User created with ID: {user_id}")
             
             # Verify the user was created
             verify_user = await self.users_db.Profile.find_one({"_id": result.inserted_id})
             if verify_user:
-                print(f"✅ User verification successful: {verify_user.get('first_name')} {verify_user.get('last_name')}")
+                logger.info(f"User verification successful: {verify_user.get('first_name')} {verify_user.get('last_name')}")
             else:
-                print(f"❌ User verification failed!")
+                logger.error("User verification failed!")
             
             return user_id
         except Exception as e:
-            print(f"Error creating user in MongoDB: {e}")
+            logger.error(f"Error creating user: {e}")
             return None
     
     async def update_user(self, clerk_id: str, update_data: dict) -> bool:
@@ -252,15 +320,17 @@ class Database:
                             trusted_only: bool = True,
                             force_scrape: bool = False) -> List[dict]:
         """Get all active job postings with 3-step priority and loop prevention"""
+        # Performance monitoring
+        start_time = time.time()
         all_jobs = []
         
         print(f"🎯 Starting 3-step job search (limit: {limit})")
         print(f"   Keywords: {keywords}, Location: {location}")
         print(f"   Filters: job_type={job_type_filter}, category={category_filter}, trusted={trusted_only}")
         
-        # ============= STEP 1: GET JOBS FROM JOBS/JOBS-LISTS COLLECTION =============
+        # ============= STEP 1: CONCURRENT MONGODB JOBS =============
         try:
-            print(f"\n📋 STEP 1: Fetching jobs from Jobs/jobs-lists collection...")
+            print(f"\n📋 STEP 1: Concurrent fetching jobs from Jobs/jobs-lists collection...")
             posted_jobs = await self.mongo_db["jobs-lists"].find(
                 {"is_active": {"$ne": False}},  # Get active jobs
                 {
@@ -273,12 +343,22 @@ class Database:
             
             print(f"✅ Found {len(posted_jobs)} jobs in Jobs/jobs-lists collection")
             
-            for job in posted_jobs:
-                converted_job = self._convert_jobs_lists_job(job)
-                if converted_job:
-                    converted_job["source"] = "jobs_lists"
-                    converted_job["priority"] = 1.0
-                    all_jobs.append(converted_job)
+            # ADVANCED OPTIMIZATION: Parallel job processing
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                job_futures = []
+                for job_data in posted_jobs:
+                    future = executor.submit(self._convert_jobs_lists_job, job_data)
+                    job_futures.append(future)
+                
+                processed_jobs = []
+                for future in concurrent.futures.as_completed(job_futures):
+                    converted_job = future.result()
+                    if converted_job:
+                        converted_job["source"] = "jobs_lists"
+                        converted_job["priority"] = 1.0
+                        processed_jobs.append(converted_job)
+                
+                all_jobs.extend(processed_jobs)
                     
             print(f"✅ Successfully processed {len([j for j in all_jobs if j.get('source') == 'jobs_lists'])} jobs from jobs-lists")
             
@@ -315,69 +395,151 @@ class Database:
                 scraped_count = 0
                 
                 print(f"📊 Found {len(job_ids)} cached job IDs from {cluster_info}")
+                print(f"🎯 Need {remaining_needed} more jobs to reach limit of {limit}")
                 
-                # LOOP PREVENTION: Limit the jobs we process
-                max_jobs_to_process = min(len(job_ids), remaining_needed * 3, 200)  # Cap at 200
+                # OPTIMIZATION: Respect the limit - only process what we actually need
+                max_jobs_to_process = min(len(job_ids), remaining_needed)  # Only process what we need
+                print(f"📋 Will process exactly {max_jobs_to_process} jobs (respecting limit)")
                 
-                for job_id in job_ids[:max_jobs_to_process]:
-                    job_data = await self.redis_client.hgetall(f"job:{job_id}")
-                    if job_data:
-                        # Convert Redis job first
-                        converted_job = self._convert_scraped_job(job_data)
+                # Split job IDs into chunks for parallel processing
+                chunk_size = min(25, max_jobs_to_process)  # Smaller chunks for better control
+                job_chunks = [job_ids[i:i + chunk_size] for i in range(0, max_jobs_to_process, chunk_size)]
+                
+                # Concurrent Redis operations using asyncio
+                
+                async def fetch_job_chunk(chunk):
+                    """Fetch a chunk of jobs concurrently"""
+                    pipeline = self.redis_client.pipeline()
+                    job_keys = [f"job:{job_id}" for job_id in chunk]
+                    
+                    for job_key in job_keys:
+                        pipeline.hgetall(job_key)
+                    
+                    return await pipeline.execute()
+                
+                # Execute all chunks concurrently
+                chunk_results = await asyncio.gather(*[fetch_job_chunk(chunk) for chunk in job_chunks])
+                
+                # Flatten results
+                job_data_list = []
+                for chunk_result in chunk_results:
+                    job_data_list.extend(chunk_result)
+                
+                print(f"📊 Processing {len(job_data_list)} job data entries")
+                
+                # Parallel job processing with threading
+                
+                seen_job_ids = set()  # Track processed job IDs
+                processed_jobs = []
+                seen_job_ids_lock = threading.Lock()
+                
+                def process_job_batch(job_batch):
+                    """Process a batch of jobs in parallel"""
+                    batch_results = []
+                    
+                    for job_data in job_batch:
+                        if not job_data:
+                            continue
+                            
+                        job_id = job_data.get('job_id', '')
                         
+                        # Thread-safe duplicate check
+                        with seen_job_ids_lock:
+                            if job_id in seen_job_ids:
+                                continue
+                            seen_job_ids.add(job_id)
+                        
+                        # Convert Redis job
+                        converted_job = self._convert_scraped_job(job_data)
                         if converted_job:
-                            # Apply location filtering to Redis jobs
-                            if location and location.strip() and location.lower() not in ["all locations", "all"]:
-                                location_lower = location.lower()
-                                
-                                # Handle location data format (could be dict or string)
-                                job_location_raw = converted_job.get('location', '')
-                                if isinstance(job_location_raw, dict):
-                                    # Extract location string from dict
-                                    parts = [
-                                        str(job_location_raw.get('city', '')),
-                                        str(job_location_raw.get('state', '')),
-                                        str(job_location_raw.get('country', ''))
-                                    ]
-                                    job_location = ' '.join(parts).lower()
-                                else:
-                                    job_location = str(job_location_raw).lower()
-                                
-                                # Enhanced location matching for USA and India
-                                if location_lower == "usa":
-                                    usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
-                                                  'texas', 'washington', 'massachusetts', 'illinois', 'colorado',
-                                                  ', ca', ', ny', ', tx', 'san francisco', 'los angeles', 'seattle']
-                                    if not any(keyword in job_location for keyword in usa_keywords):
-                                        continue  # Skip this job
-                                    # Exclude jobs that also contain India keywords
-                                    india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
-                                                    'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
-                                    if any(india_keyword in job_location for india_keyword in india_keywords):
-                                        continue  # Skip this job
-                                elif location_lower == "india":
-                                    india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
-                                                    'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
-                                    if not any(keyword in job_location for keyword in india_keywords):
-                                        continue  # Skip this job
-                                    # Exclude jobs that also contain USA keywords
-                                    usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
-                                                  'texas', 'washington', 'massachusetts', 'illinois', 'colorado']
-                                    if any(usa_keyword in job_location for usa_keyword in usa_keywords):
-                                        continue  # Skip this job
-                                else:
-                                    # Generic location matching
-                                    if location_lower not in job_location and "remote" not in job_location:
-                                        continue  # Skip this job
-                            
-                            # Job passed location filter, add it
-                            converted_job["source"] = "scraped"
-                            converted_job["priority"] = 0.7
-                            all_jobs.append(converted_job)
-                            scraped_count += 1
-                            
-                            if scraped_count >= remaining_needed:
-                                break
+                            batch_results.append(converted_job)
+                    
+                    return batch_results
+                
+                # Split job data into batches for parallel processing
+                batch_size = 20
+                job_batches = [job_data_list[i:i + batch_size] for i in range(0, len(job_data_list), batch_size)]
+                
+                # Process batches in parallel using ThreadPoolExecutor
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                    batch_futures = [executor.submit(process_job_batch, batch) for batch in job_batches]
+                    
+                    for future in concurrent.futures.as_completed(batch_futures):
+                        batch_results = future.result()
+                        processed_jobs.extend(batch_results)
+                
+                # Apply location filtering to all processed jobs
+                filtered_jobs = []
+                print(f"🔍 DEBUG: location='{location}', type={type(location)}, strip='{location.strip() if location else 'None'}'")
+                print(f"🔍 Processing {len(processed_jobs)} jobs for location filtering...")
+                
+                for converted_job in processed_jobs:
+                    # Check if we should apply location filtering
+                    # "All Locations" comes as None or empty string from frontend
+                    should_filter = (location is not None and 
+                                   location.strip() and 
+                                   location.lower() not in ["all locations", "all"] and
+                                   location.strip() != "")
+                    
+                    if should_filter:
+                        location_lower = location.lower()
+                        
+                        # Handle location data format (could be dict or string)
+                        job_location_raw = converted_job.get('location', '')
+                        if isinstance(job_location_raw, dict):
+                            # Extract location string from dict
+                            parts = [
+                                str(job_location_raw.get('city', '')),
+                                str(job_location_raw.get('state', '')),
+                                str(job_location_raw.get('country', ''))
+                            ]
+                            job_location = ' '.join(parts).lower()
+                        else:
+                            job_location = str(job_location_raw).lower()
+                        
+                        # Enhanced location matching for USA and India
+                        if location_lower == "usa":
+                            usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
+                                          'texas', 'washington', 'massachusetts', 'illinois', 'colorado',
+                                          ', ca', ', ny', ', tx', 'san francisco', 'los angeles', 'seattle']
+                            if not any(keyword in job_location for keyword in usa_keywords):
+                                continue  # Skip this job
+                            # Exclude jobs that also contain India keywords
+                            india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
+                                            'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
+                            if any(india_keyword in job_location for india_keyword in india_keywords):
+                                continue  # Skip this job
+                        elif location_lower == "india":
+                            india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
+                                            'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
+                            if not any(keyword in job_location for keyword in india_keywords):
+                                continue  # Skip this job
+                            # Exclude jobs that also contain USA keywords
+                            usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
+                                          'texas', 'washington', 'massachusetts', 'illinois', 'colorado']
+                            if any(usa_keyword in job_location for usa_keyword in usa_keywords):
+                                continue  # Skip this job
+                        else:
+                            # Generic location matching
+                            if location_lower not in job_location and "remote" not in job_location:
+                                continue  # Skip this job
+                    
+                        # Job passed location filter, add it to filtered list
+                        converted_job["source"] = "scraped"
+                        converted_job["priority"] = 0.7
+                        filtered_jobs.append(converted_job)
+                    else:
+                        # For "All Locations", include all jobs without filtering
+                        converted_job["source"] = "scraped"
+                        converted_job["priority"] = 0.7
+                        filtered_jobs.append(converted_job)
+                
+                # Add all filtered jobs to the main list
+                all_jobs.extend(filtered_jobs)
+                scraped_count = len(filtered_jobs)
+                
+                print(f"✅ Location filter: '{location}' - Applied filtering")
+                print(f"📊 Processed {len(processed_jobs)} jobs → {len(filtered_jobs)} passed location filter")
                 
                 print(f"✅ Successfully processed {scraped_count} cached Redis jobs")
                 
@@ -390,9 +552,19 @@ class Database:
         # LOOP PREVENTION: Only scrape if we have very few jobs and haven't scraped recently
         # OR if force_scrape is explicitly requested
         # For "All Locations" (default), be more conservative about scraping
+        # OPTIMIZATION: Smart caching thresholds based on location and time
         is_default_or_all_locations = (not location or location.strip() == "" or 
                                       (location and location.lower() == "all locations"))
-        min_jobs_threshold = 20 if is_default_or_all_locations else max(50, limit * 0.1)
+        
+        # Dynamic thresholds based on time of day and location
+        from datetime import datetime
+        current_hour = datetime.now().hour
+        
+        # Higher thresholds during peak hours (9 AM - 6 PM) for better performance
+        if 9 <= current_hour <= 18:
+            min_jobs_threshold = 30 if is_default_or_all_locations else max(60, limit * 0.15)
+        else:
+            min_jobs_threshold = 20 if is_default_or_all_locations else max(50, limit * 0.1)
         should_scrape = (
             remaining_needed > 0 and 
             (len(all_jobs) < min_jobs_threshold or force_scrape)  # Scrape if few jobs OR force_scrape=True
@@ -425,16 +597,12 @@ class Database:
                             print(f"   Skipping scraping for 'All Locations' - have {len(all_jobs)} cached jobs")
                             return all_jobs  # Return early without scraping
                         broad_location = "United States"  # Default to USA for scraping
-                    elif not location or location.strip() == "":
-                        # DEFAULT: No location specified - treat as "All Locations"
+                    else:
+                        # DEFAULT: No location specified or empty string - treat as "All Locations"
                         if len(all_jobs) >= 20:  # If we have 20+ jobs, don't scrape
                             print(f"   Skipping scraping for default (All Locations) - have {len(all_jobs)} cached jobs")
                             return all_jobs  # Return early without scraping
-                        broad_location = "United States"  # Default to USA for scraping
-                    elif location and location.strip():
-                        broad_location = location  # Use the original location
-                    else:
-                        broad_location = "United States"  # Default to USA for empty location
+                        broad_location = "United States"  # Start with USA, then India if needed
                     
                     print(f"   Using broader terms: keywords='{broad_keywords}', location='{broad_location}'")
                     
@@ -461,6 +629,49 @@ class Database:
                     
                     print(f"✅ Added {fresh_jobs_added} freshly scraped jobs")
                     
+                    # ADVANCED OPTIMIZATION: Parallel scraping for "All Locations"
+                    is_all_locations = (not location or location.strip() == "" or 
+                                       (location and location.lower() == "all locations"))
+                    remaining_after_first_scrape = limit - len(all_jobs)
+                    
+                    if is_all_locations and remaining_after_first_scrape > 10 and broad_location == "United States":
+                        print(f"🔄 'All Locations' - parallel scraping from India for {remaining_after_first_scrape} more jobs...")
+                        
+                        # Parallel scraping using asyncio
+                        def scrape_india_jobs():
+                            return self.scraper.get_jobs(
+                                keywords=broad_keywords,
+                                location="India",
+                                max_jobs=min(remaining_after_first_scrape, 50),
+                                job_type_filter=job_type_filter,
+                                category_filter=category_filter,
+                                trusted_only=trusted_only,
+                                force_refresh=force_scrape
+                            )
+                        
+                        # Execute India scraping concurrently
+                        india_scraped_jobs = await asyncio.to_thread(scrape_india_jobs)
+                        
+                        print(f"✅ India scraping returned {len(india_scraped_jobs)} fresh jobs")
+                        
+                        # Parallel job processing
+                        india_jobs_added = 0
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                            job_futures = []
+                            for job in india_scraped_jobs:
+                                future = executor.submit(self._convert_scraped_job_format, job)
+                                job_futures.append(future)
+                            
+                            for future in concurrent.futures.as_completed(job_futures):
+                                converted_job = future.result()
+                                if converted_job:
+                                    converted_job["source"] = "fresh_scraped"
+                                    converted_job["priority"] = 0.5
+                                    all_jobs.append(converted_job)
+                                    india_jobs_added += 1
+                        
+                        print(f"✅ Added {india_jobs_added} India jobs")
+                    
                 else:
                     print("❌ Web scraper not available")
                     
@@ -485,7 +696,13 @@ class Database:
         all_jobs.sort(key=lambda x: x.get('priority', 0), reverse=True)
         final_jobs = all_jobs[:limit]
         
+        # OPTIMIZATION: Performance monitoring
+        end_time = time.time()
+        execution_time = end_time - start_time
+        
         print(f"🎯 Returning {len(final_jobs)} jobs to recommendation system")
+        print(f"⚡ Performance: {execution_time:.2f}s total execution time")
+        
         return final_jobs
     
     def _matches_search_criteria(self, job_data: dict, keywords: str, location: str, 
@@ -591,6 +808,49 @@ class Database:
             "coordinates": None
         }
     
+    def _convert_job_data(self, job_data: dict) -> dict:
+        """Convert job data to standardized format for frontend consumption."""
+        try:
+            if not job_data:
+                return None
+                
+            # Handle different job data sources
+            if 'title' in job_data and 'company' in job_data:
+                # This looks like a jobs-lists or Redis job
+                return self._convert_jobs_lists_job(job_data)
+            elif '_id' in job_data or 'employer_id' in job_data:
+                # This looks like a MongoDB job
+                return self._convert_mongo_job(job_data)
+            else:
+                # This might be frontend job data, return as-is with minimal processing
+                return {
+                    "id": str(job_data.get("id", job_data.get("_id", ""))),
+                    "title": job_data.get("title", ""),
+                    "description": job_data.get("description", ""),
+                    "company": job_data.get("company", ""),
+                    "location": job_data.get("location", ""),
+                    "salary": job_data.get("salary", ""),
+                    "matchPercentage": job_data.get("matchPercentage", 0),
+                    "type": job_data.get("type", job_data.get("employment_type", "")),
+                    "requirements": job_data.get("requirements", []),
+                    "benefits": job_data.get("benefits", []),
+                    "tags": job_data.get("tags", job_data.get("skills_required", [])),
+                    "postedTime": job_data.get("postedTime", job_data.get("posted_at", "")),
+                    "companySize": job_data.get("companySize", ""),
+                    "experience": job_data.get("experience", job_data.get("experience_level", "")),
+                    "companyDescription": job_data.get("companyDescription", ""),
+                    "hrContact": job_data.get("hrContact", None),
+                    "employment_type": job_data.get("employment_type", ""),
+                    "skills_required": job_data.get("skills_required", []),
+                    "is_active": job_data.get("is_active", True),
+                    "employer_id": job_data.get("employer_id", ""),
+                    "posted_at": job_data.get("posted_at", ""),
+                    "expires_at": job_data.get("expires_at", ""),
+                    "responsibilities": job_data.get("responsibilities", [])
+                }
+        except Exception as e:
+            logger.error(f"Error converting job data: {e}")
+            return None
     def _convert_jobs_lists_job(self, job_data: dict) -> dict:
         """Convert jobs-lists collection job data to our expected format"""
         try:
@@ -878,52 +1138,150 @@ class Database:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    # ===== Saved/Liked jobs persistence in MongoDB =====
-    async def save_user_job_action(self, user_id: str, job_id: str, action: str, job_snapshot: Optional[dict] = None) -> bool:
-        """Persist a user's job action (e.g., save/like/dislike) to MongoDB.
+    # ===== Separate Collections for Job Actions =====
+    
 
-        Collection: users.user_job_actions
-        Unique per (user_id, job_id, action)
-        """
+    async def save_job_saved(self, user_id: str, job_id: str, job_details: dict) -> bool:
+        """Save job bookmark with full job details to users_job_saved collection."""
         try:
-            collection = self.users_db.user_job_actions
+            collection = self.users_db.users_job_saved
             now = datetime.utcnow()
             
-            logger.info(f"💾 Saving {action} action: user={user_id[:8]}..., job={job_id[:8]}...")
+            logger.info(f"🔖 Saving job bookmark: user={user_id[:8]}..., job={job_id[:8]}...")
             
-            update_doc = {"$set": {"user_id": user_id, "job_id": job_id, "action": action, "updated_at": now},
-                          "$setOnInsert": {"created_at": now}}
-            if job_snapshot:
-                update_doc["$set"]["job_snapshot"] = job_snapshot
+            # Prepare document with full job details
+            saved_doc = {
+                "user_id": user_id,
+                "job_id": job_id,
+                "job_details": job_details,
+                "saved_at": now,
+                "created_at": now,
+                "updated_at": now
+            }
             
             result = await collection.update_one(
-                {"user_id": user_id, "job_id": job_id, "action": action},
-                update_doc,
+                {"user_id": user_id, "job_id": job_id},
+                {"$set": saved_doc},
                 upsert=True,
             )
             
             if result.upserted_id:
-                logger.info(f"✅ New {action} saved (ID: {str(result.upserted_id)[:8]}...)")
+                logger.info(f"✅ New job bookmark saved (ID: {str(result.upserted_id)[:8]}...)")
             elif result.modified_count > 0:
-                logger.info(f"✅ {action.capitalize()} updated")
+                logger.info(f"✅ Job bookmark updated")
             else:
-                logger.debug(f"ℹ️  {action.capitalize()} already exists (no changes)")
+                logger.debug(f"ℹ️  Job bookmark already exists (no changes)")
             
             return True
         except Exception as e:
-            logger.error(f"❌ Failed to save user job action: {e}")
-            print(f"❌ Error details: {str(e)}")
+            logger.error(f"❌ Failed to save job bookmark: {e}")
             import traceback
             traceback.print_exc()
             return False
 
+    async def save_job_like(self, user_id: str, job_id: str, job_details: dict) -> bool:
+        """Save job like with full job details to users_job_like collection."""
+        try:
+            collection = self.users_db.users_job_like
+            now = datetime.utcnow()
+            
+            logger.info(f"💚 Saving job like: user={user_id[:8]}..., job={job_id[:8]}...")
+            
+            # Prepare document with full job details
+            like_doc = {
+                "user_id": user_id,
+                "job_id": job_id,
+                "job_details": job_details,
+                "liked_at": now,
+                "created_at": now,
+                "updated_at": now
+            }
+            
+            result = await collection.update_one(
+                {"user_id": user_id, "job_id": job_id},
+                {"$set": like_doc},
+                upsert=True,
+            )
+            
+            if result.upserted_id:
+                logger.info(f"✅ New job like saved (ID: {str(result.upserted_id)[:8]}...)")
+            elif result.modified_count > 0:
+                logger.info(f"✅ Job like updated")
+            else:
+                logger.debug(f"ℹ️  Job like already exists (no changes)")
+            
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to save job like: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    async def save_job_dislike(self, user_id: str, job_id: str) -> bool:
+        """Save job dislike with minimal data to users_job_dislike collection."""
+        try:
+            collection = self.users_db.users_job_dislike
+            now = datetime.utcnow()
+            
+            logger.info(f"👎 Saving job dislike: user={user_id[:8]}..., job={job_id[:8]}...")
+            
+            # Minimal document - only user_id and job_id
+            dislike_doc = {
+                "user_id": user_id,
+                "job_id": job_id,
+                "disliked_at": now,
+                "created_at": now
+            }
+            
+            result = await collection.update_one(
+                {"user_id": user_id, "job_id": job_id},
+                {"$set": dislike_doc},
+                upsert=True,
+            )
+            
+            if result.upserted_id:
+                logger.info(f"✅ New job dislike saved (ID: {str(result.upserted_id)[:8]}...)")
+            elif result.modified_count > 0:
+                logger.info(f"✅ Job dislike updated")
+            else:
+                logger.debug(f"ℹ️  Job dislike already exists (no changes)")
+            
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to save job dislike: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    # Legacy method for backward compatibility - handles 3 actions only
+    async def save_user_job_action(self, user_id: str, job_id: str, action: str, job_snapshot: Optional[dict] = None) -> bool:
+        """Legacy method - redirects to new separate collection methods.
+        
+        Actions handled:
+        1. 'like' (apply) -> users_job_like (with full job details)
+        2. 'dislike' (pass) -> users_job_dislike (minimal data)
+        3. 'save' -> users_job_saved (with full job details)
+        """
+        try:
+            if action == "like":
+                return await self.save_job_like(user_id, job_id, job_snapshot or {})
+            elif action == "save":
+                return await self.save_job_saved(user_id, job_id, job_snapshot or {})
+            elif action == "dislike":
+                return await self.save_job_dislike(user_id, job_id)
+            else:
+                logger.warning(f"⚠️  Unknown action '{action}', saving as dislike")
+                return await self.save_job_dislike(user_id, job_id)
+        except Exception as e:
+            logger.error(f"❌ Failed to save user job action: {e}")
+            return False
+
     async def remove_saved_job(self, user_id: str, job_id: str) -> bool:
-        """Remove a saved job document for a user."""
+        """Remove a saved job document for a user from users_job_saved collection."""
         try:
             logger.info(f"🗑️  Removing saved job: user={user_id[:8]}..., job={job_id[:8]}...")
             
-            result = await self.users_db.user_job_actions.delete_one(
-                {"user_id": user_id, "job_id": job_id, "action": "save"}
+            result = await self.users_db.users_job_saved.delete_one(
+                {"user_id": user_id, "job_id": job_id}
             )
             
             if result.deleted_count > 0:
@@ -936,76 +1294,197 @@ class Database:
             logger.error(f"❌ Failed to remove saved job: {e}")
             return False
 
-    async def get_user_saved_jobs(self, user_id: str) -> List[dict]:
-        """Return saved jobs with enriched job data when available."""
+
+    async def remove_job_like(self, user_id: str, job_id: str) -> bool:
+        """Remove a job like for a user from users_job_like collection."""
         try:
-            cursor = self.users_db.user_job_actions.find({"user_id": user_id, "action": "save"})
+            logger.info(f"🗑️  Removing job like: user={user_id[:8]}..., job={job_id[:8]}...")
+            
+            result = await self.users_db.users_job_like.delete_one(
+                {"user_id": user_id, "job_id": job_id}
+            )
+            
+            if result.deleted_count > 0:
+                logger.info(f"✅ Job like removed successfully")
+                return True
+            else:
+                logger.warning(f"⚠️  Job like not found (may already be removed)")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Failed to remove job like: {e}")
+            return False
+    async def remove_job_dislike(self, user_id: str, job_id: str) -> bool:
+        """Remove a job dislike for a user from users_job_dislike collection."""
+        try:
+            logger.info(f"🗑️  Removing job dislike: user={user_id[:8]}..., job={job_id[:8]}...")
+            
+            result = await self.users_db.users_job_dislike.delete_one(
+                {"user_id": user_id, "job_id": job_id}
+            )
+            
+            if result.deleted_count > 0:
+                logger.info(f"✅ Job dislike removed successfully")
+                return True
+            else:
+                logger.warning(f"⚠️  Job dislike not found (may already be removed)")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Failed to remove job dislike: {e}")
+            return False
+
+    async def get_user_saved_jobs_optimized(self, user_id: str) -> List[dict]:
+        """Optimized version of get_user_saved_jobs with concurrent operations"""
+        try:
+            # Use cache first
+            cache_key = self._get_cache_key("saved_jobs", user_id)
+            cached_jobs = self._get_from_cache(cache_key)
+            if cached_jobs is not None:
+                logger.debug(f"📋 Cache hit for saved jobs: {user_id[:8]}...")
+                return cached_jobs
+            
+            # Fetch from database with concurrent operations
+            cursor = self.users_db.users_job_saved.find({"user_id": user_id})
+            items = [doc async for doc in cursor]
+            
+            if not items:
+                self._set_cache(cache_key, [])
+                return []
+            
+            # Process jobs concurrently
+            async def process_job_doc(doc):
+                job_details = doc.get("job_details", {})
+                if job_details:
+                    return {
+                        "id": doc.get("job_id"),
+                        "saved_at": doc.get("saved_at"),
+                        **job_details
+                    }
+                else:
+                    # Fallback: try to get job from main collection
+                    job_id = doc.get("job_id")
+                    job_data = await self.get_job_by_id(job_id)
+                    if job_data:
+                        job_obj = self._convert_job_data(job_data)
+                        if job_obj:
+                            return {
+                                "id": job_id,
+                                "saved_at": doc.get("saved_at"),
+                                **job_obj
+                            }
+                return None
+            
+            # Process all jobs concurrently
+            results = await asyncio.gather(*[process_job_doc(doc) for doc in items])
+            final_results = [result for result in results if result is not None]
+            
+            # Cache the results
+            self._set_cache(cache_key, final_results)
+            logger.debug(f"📋 Processed {len(final_results)} saved jobs for user: {user_id[:8]}...")
+            
+            return final_results
+        except Exception as e:
+            logger.error(f"Failed to fetch saved jobs: {e}")
+            return []
+    
+    async def get_user_saved_jobs(self, user_id: str) -> List[dict]:
+        """Return saved jobs from users_job_saved collection with full job details."""
+        try:
+            cursor = self.users_db.users_job_saved.find({"user_id": user_id})
             items = [doc async for doc in cursor]
             results: List[dict] = []
+            
             for doc in items:
-                jid = str(doc.get("job_id"))
-                job_data = await self.get_job_by_id(jid)
-                if job_data:
-                    # Normalize to JobPosting fields expected by frontend
-                    job_obj = self._convert_job_data(job_data)
-                    if job_obj:
-                        results.append(job_obj)
+                job_details = doc.get("job_details", {})
+                if job_details:
+                    # Use the stored job details directly
+                    results.append({
+                        "id": doc.get("job_id"),
+                        "saved_at": doc.get("saved_at"),
+                        **job_details
+                    })
                 else:
-                    # Fallback to stored snapshot
-                    snapshot = doc.get("job_snapshot") or {}
-                    snapshot_id = snapshot.get("id") or snapshot.get("_id") or jid
-                    results.append({"id": str(snapshot_id), **snapshot})
+                    # Fallback: try to get job from main collection
+                    job_id = doc.get("job_id")
+                    job_data = await self.get_job_by_id(job_id)
+                    if job_data:
+                        job_obj = self._convert_job_data(job_data)
+                        if job_obj:
+                            results.append({
+                                "id": job_id,
+                                "saved_at": doc.get("saved_at"),
+                                **job_obj
+                            })
+            
             return results
         except Exception as e:
             logger.error(f"Failed to fetch saved jobs: {e}")
             return []
 
-    async def get_user_liked_jobs(self, user_id: str) -> List[dict]:
-        """Return liked jobs with enriched job data when available."""
-        try:
-            cursor = self.users_db.user_job_actions.find({"user_id": user_id, "action": {"$in": ["like", "super_like"]}})
-            items = [doc async for doc in cursor]
-            results: List[dict] = []
-            for doc in items:
-                jid = str(doc.get("job_id"))
-                job_data = await self.get_job_by_id(jid)
-                if job_data:
-                    # Normalize to JobPosting fields expected by frontend
-                    job_obj = self._convert_job_data(job_data)
-                    if job_obj:
-                        results.append(job_obj)
-                else:
-                    # Fallback to stored snapshot
-                    snapshot = doc.get("job_snapshot") or {}
-                    snapshot_id = snapshot.get("id") or snapshot.get("_id") or jid
-                    results.append({"id": str(snapshot_id), **snapshot})
-            return results
-        except Exception as e:
-            logger.error(f"Failed to fetch liked jobs: {e}")
-            return []
 
     async def get_user_disliked_jobs(self, user_id: str) -> List[dict]:
-        """Return disliked jobs with enriched job data when available."""
+        """Return disliked job IDs from users_job_dislike collection (minimal data)."""
         try:
-            cursor = self.users_db.user_job_actions.find({"user_id": user_id, "action": "dislike"})
+            cursor = self.users_db.users_job_dislike.find({"user_id": user_id})
             items = [doc async for doc in cursor]
             results: List[dict] = []
+            
             for doc in items:
-                jid = str(doc.get("job_id"))
-                job_data = await self.get_job_by_id(jid)
-                if job_data:
-                    # Normalize to JobPosting fields expected by frontend
-                    job_obj = self._convert_job_data(job_data)
-                    if job_obj:
-                        results.append(job_obj)
-                else:
-                    # Fallback to stored snapshot
-                    snapshot = doc.get("job_snapshot") or {}
-                    snapshot_id = snapshot.get("id") or snapshot.get("_id") or jid
-                    results.append({"id": str(snapshot_id), **snapshot})
+                # Only return basic info for disliked jobs
+                results.append({
+                    "job_id": doc.get("job_id"),
+                    "disliked_at": doc.get("disliked_at"),
+                    "user_id": doc.get("user_id")
+                })
+            
             return results
         except Exception as e:
             logger.error(f"Failed to fetch disliked jobs: {e}")
+            return []
+
+    async def is_job_disliked(self, user_id: str, job_id: str) -> bool:
+        """Check if a job is disliked by the user."""
+        try:
+            result = await self.users_db.users_job_dislike.find_one({
+                "user_id": user_id, 
+                "job_id": job_id
+            })
+            return result is not None
+        except Exception as e:
+            logger.error(f"Failed to check if job is disliked: {e}")
+            return False
+
+    async def get_user_liked_jobs(self, user_id: str) -> List[dict]:
+        """Return liked jobs from users_job_like collection with full job details."""
+        try:
+            cursor = self.users_db.users_job_like.find({"user_id": user_id})
+            items = [doc async for doc in cursor]
+            results: List[dict] = []
+            
+            for doc in items:
+                job_details = doc.get("job_details", {})
+                if job_details:
+                    # Use the stored job details directly
+                    results.append({
+                        "id": doc.get("job_id"),
+                        "liked_at": doc.get("liked_at"),
+                        **job_details
+                    })
+                else:
+                    # Fallback: try to get job from main collection
+                    job_id = doc.get("job_id")
+                    job_data = await self.get_job_by_id(job_id)
+                    if job_data:
+                        job_obj = self._convert_job_data(job_data)
+                        if job_obj:
+                            results.append({
+                                "id": job_id,
+                                "liked_at": doc.get("liked_at"),
+                                **job_obj
+                            })
+            
+            return results
+        except Exception as e:
+            logger.error(f"Failed to fetch liked jobs: {e}")
             return []
 
     async def get_user_action_job_ids(self, user_id: str, actions: List[str]) -> List[str]:

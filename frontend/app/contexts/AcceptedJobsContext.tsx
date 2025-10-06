@@ -28,13 +28,14 @@ export const AcceptedJobsProvider: React.FC<{ children: React.ReactNode }> = ({ 
     }
     
     try {
-      console.log('Fetching liked jobs from backend for user:', user.id);
+      console.log('Fetching liked jobs (applied jobs) from backend for user:', user.id);
+      // Liked jobs represent applied jobs in our 3-action system
       const jobs = await api.getLikedJobs(user.id);
-      console.log('Retrieved liked jobs count:', jobs?.length || 0);
+      console.log('Retrieved liked jobs (applied) count:', jobs?.length || 0);
       setAcceptedJobs(jobs);
       return jobs;
     } catch (error) {
-      console.error('Failed to fetch liked jobs:', error);
+      console.error('Failed to fetch liked jobs (applied):', error);
       setAcceptedJobs([]);
       return [];
     }
@@ -43,7 +44,7 @@ export const AcceptedJobsProvider: React.FC<{ children: React.ReactNode }> = ({ 
   useEffect(() => {
     console.log('AcceptedJobsProvider: User changed, refreshing jobs');
     if (user) {
-      console.log('User is authenticated, fetching liked jobs from backend');
+      console.log('User is authenticated, fetching liked jobs (applied) from backend');
       refreshAcceptedJobs();
     } else {
       console.log('No user authenticated, clearing jobs');
@@ -57,7 +58,7 @@ export const AcceptedJobsProvider: React.FC<{ children: React.ReactNode }> = ({ 
       return;
     }
     
-    console.log('Adding liked job to backend:', job.id, 'for user:', user.id);
+    console.log('Adding liked job (applied) to backend:', job.id, 'for user:', user.id);
     
     // The job is already sent to backend via handleSwipeAction in index.tsx
     // Just update local state optimistically and refresh
@@ -76,13 +77,19 @@ export const AcceptedJobsProvider: React.FC<{ children: React.ReactNode }> = ({ 
       return;
     }
     
-    console.log('Removing liked job from backend:', jobId, 'for user:', user.id);
+    console.log('Removing liked job (applied) from backend:', jobId, 'for user:', user.id);
     
     // Update local state immediately for better UX
     setAcceptedJobs(prev => prev.filter(job => job.id !== jobId));
     
-    // Note: You may want to add a backend endpoint to remove liked jobs
-    // For now, just refresh to sync with backend
+    // Call backend to remove liked job
+    try {
+      await api.removeLikedJob(user.id, jobId);
+    } catch (error) {
+      console.error('Failed to remove liked job (applied) from backend:', error);
+    }
+    
+    // Refresh to sync with backend
     setTimeout(() => refreshAcceptedJobs(), 500);
   };
 

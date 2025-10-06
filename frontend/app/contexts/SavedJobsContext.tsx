@@ -62,7 +62,8 @@ export const SavedJobsProvider = ({ children }: { children: ReactNode }) => {
   const addJob = async (job: Job) => {
     const userKey = getUserKey();
     try {
-      await api.handleSwipeAction(userKey, job.id, 'save');
+      // Pass the complete job object as job_payload to ensure all details are saved
+      await api.handleSwipeAction(userKey, job.id, 'save', job);
       const jobs = await api.getSavedJobs(userKey);
       setSavedJobs(jobs || []);
     } catch (e) {

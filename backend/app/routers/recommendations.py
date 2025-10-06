@@ -25,12 +25,10 @@ class SwipeRequest(BaseModel):
 class CreateUserRequest(BaseModel):
     clerk_id: str
     email: str
-    first_name: str
-    last_name: str
-    role: str = "job_seeker"  # "job_seeker" or "employer"
-    skills: List[str] = []
-    location: str = None
-    company_name: str = None  # For employers
+
+class RemoveSavedRequest(BaseModel):
+    user_id: str
+    job_id: str
 
 
 def get_recommender():
@@ -170,9 +168,9 @@ async def get_recommendations(
         print(f"Location filter: {location}")
         print(f"Timestamp: {datetime.utcnow().isoformat()}")
         
-        # 1. Fetch user data
-        print(f"📋 Fetching user profile from MongoDB...")
-        user = await db.get_user_by_clerk_id(clerk_id)
+        # 1. Fetch user data with caching
+        print(f"📋 Fetching user profile from MongoDB (with cache)...")
+        user = await db.get_user_by_clerk_id_cached(clerk_id)
         if not user:
             print(f"❌ User not found in MongoDB")
             raise HTTPException(status_code=404, detail="User not found")
@@ -543,16 +541,16 @@ async def handle_swipe_action(request: SwipeRequest):
 
 @router.get("/saved/{clerk_id}")
 async def get_saved_jobs(clerk_id: str):
-    """Return the user's saved jobs from MongoDB."""
+    """Return the user's saved jobs from MongoDB with caching."""
     try:
-        jobs = await db.get_user_saved_jobs(clerk_id)
+        jobs = await db.get_user_saved_jobs_optimized(clerk_id)
         return jobs
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch saved jobs: {str(e)}")
 
 @router.get("/liked/{clerk_id}")
 async def get_liked_jobs(clerk_id: str):
-    """Return the user's liked jobs from MongoDB."""
+    """Return the user's liked jobs from users_job_like collection."""
     try:
         print(f"\n💚 === FETCHING LIKED JOBS ===")
         print(f"User ID: {clerk_id}")
@@ -563,9 +561,15 @@ async def get_liked_jobs(clerk_id: str):
         print(f"💥 Error fetching liked jobs: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch liked jobs: {str(e)}")
 
-class RemoveSavedRequest(BaseModel):
-    user_id: str
-    job_id: str
+@router.post("/liked/remove")
+async def remove_liked_job(req: RemoveSavedRequest):
+    """Remove a liked job from users_job_like collection"""
+    try:
+        ok = await db.remove_job_like(req.user_id, req.job_id)
+        return {"success": ok}
+    except Exception as e:
+        logger.error(f"❌ Error removing liked job: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to remove liked job: {str(e)}")
 
 @router.post("/saved/remove")
 async def remove_saved_job(req: RemoveSavedRequest):
@@ -576,3 +580,34 @@ async def remove_saved_job(req: RemoveSavedRequest):
     except Exception as e:
         logger.error(f"❌ Error removing saved job: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to remove saved job: {str(e)}")
+
+# New endpoints for separate collections
+
+
+@router.get("/disliked/{clerk_id}")
+async def get_disliked_jobs(clerk_id: str):
+    """Return the user's disliked job IDs from users_job_dislike collection."""
+    try:
+        jobs = await db.get_user_disliked_jobs(clerk_id)
+        return jobs
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch disliked jobs: {str(e)}")
+
+@router.post("/disliked/remove")
+async def remove_disliked_job(req: RemoveSavedRequest):
+    """Remove a disliked job from users_job_dislike collection"""
+    try:
+        ok = await db.remove_job_dislike(req.user_id, req.job_id)
+        return {"success": ok}
+    except Exception as e:
+        logger.error(f"❌ Error removing disliked job: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to remove disliked job: {str(e)}")
+
+@router.get("/disliked/check/{clerk_id}/{job_id}")
+async def check_job_disliked(clerk_id: str, job_id: str):
+    """Check if a specific job is disliked by the user."""
+    try:
+        is_disliked = await db.is_job_disliked(clerk_id, job_id)
+        return {"is_disliked": is_disliked}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to check job dislike status: {str(e)}")

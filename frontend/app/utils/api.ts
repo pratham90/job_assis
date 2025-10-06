@@ -29,10 +29,38 @@ console.log('🔗 API Configuration:');
 console.log('  RAW_API_BASE:', RAW_API_BASE);
 console.log('  API_BASE_URL:', API_BASE_URL);
 
-// API utility functions
+// API utility functions with performance optimizations
 export const api = {
-  // Get job recommendations for a user
+  // Cache for API responses
+  _cache: new Map<string, { data: any; timestamp: number }>(),
+  _cacheTimeout: 5 * 60 * 1000, // 5 minutes
+
+  // Cache helper methods
+  _getCacheKey: (url: string, params?: any) => {
+    return `${url}:${JSON.stringify(params || {})}`;
+  },
+
+  _getFromCache: (key: string) => {
+    const cached = api._cache.get(key);
+    if (cached && Date.now() - cached.timestamp < api._cacheTimeout) {
+      console.log('📋 Cache hit for:', key);
+      return cached.data;
+    }
+    if (cached) {
+      api._cache.delete(key);
+    }
+    return null;
+  },
+
+  _setCache: (key: string, data: any) => {
+    api._cache.set(key, { data, timestamp: Date.now() });
+  },
+  // Get job recommendations for a user with caching
   async getRecommendations(clerkId: string, limit: number = 10, location: string = 'All Locations') {
+    const cacheKey = api._getCacheKey('/api/recommend', { clerkId, limit, location });
+    const cached = api._getFromCache(cacheKey);
+    if (cached) return cached;
+
     const locParam = `&location=${encodeURIComponent(location)}`;
     const url = `${API_BASE_URL}/api/recommend/${clerkId}?limit=${limit}${locParam}`;
     console.log('📡 Fetching recommendations from:', url);
@@ -49,6 +77,9 @@ export const api = {
     
     const data = await response.json();
     console.log('✅ Recommendations received:', data?.length || 0, 'jobs');
+    
+    // Cache the results
+    api._setCache(cacheKey, data);
     return data;
   },
 
@@ -73,12 +104,22 @@ export const api = {
     return response.json();
   },
 
-  // Saved jobs APIs
+  // Saved jobs APIs with caching
   async getSavedJobs(clerkId: string) {
+    const cacheKey = api._getCacheKey('/api/recommend/saved', { clerkId });
+    const cached = api._getFromCache(cacheKey);
+    if (cached) return cached;
+
     const url = `${API_BASE_URL}/api/recommend/saved/${clerkId}`;
+    console.log('📡 Fetching saved jobs from:', url);
     const response = await fetch(url);
     if (!response.ok) throw new Error(`Failed to fetch saved jobs: ${response.statusText}`);
-    return response.json();
+    const data = await response.json();
+    console.log('✅ Saved jobs received:', data?.length || 0);
+    
+    // Cache the results
+    api._setCache(cacheKey, data);
+    return data;
   },
 
   async removeSavedJob(userId: string, jobId: string) {
@@ -114,6 +155,78 @@ export const api = {
     if (!response.ok) throw new Error(`Failed to fetch liked jobs: ${response.statusText}`);
     const data = await response.json();
     console.log('✅ Liked jobs received:', data?.length || 0);
+    return data;
+  },
+
+  async removeLikedJob(userId: string, jobId: string) {
+    const url = `${API_BASE_URL}/api/recommend/liked/remove`;
+    console.log('🗑️  Removing liked job from:', url);
+    console.log('   User ID:', userId);
+    console.log('   Job ID:', jobId);
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, job_id: jobId }),
+    });
+    
+    console.log('📊 Remove liked job response status:', response.status, response.statusText);
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('❌ Remove liked job error:', errorText);
+      throw new Error(`Failed to remove liked job: ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    console.log('✅ Remove liked job response:', data);
+    return data;
+  },
+
+
+  // Disliked jobs APIs
+  async getDislikedJobs(clerkId: string) {
+    const url = `${API_BASE_URL}/api/recommend/disliked/${clerkId}`;
+    console.log('👎 Fetching disliked jobs from:', url);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Failed to fetch disliked jobs: ${response.statusText}`);
+    const data = await response.json();
+    console.log('✅ Disliked jobs received:', data?.length || 0);
+    return data;
+  },
+
+  async removeDislikedJob(userId: string, jobId: string) {
+    const url = `${API_BASE_URL}/api/recommend/disliked/remove`;
+    console.log('🗑️  Removing disliked job from:', url);
+    console.log('   User ID:', userId);
+    console.log('   Job ID:', jobId);
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, job_id: jobId }),
+    });
+    
+    console.log('📊 Remove disliked job response status:', response.status, response.statusText);
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('❌ Remove disliked job error:', errorText);
+      throw new Error(`Failed to remove disliked job: ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    console.log('✅ Remove disliked job response:', data);
+    return data;
+  },
+
+  async checkJobDisliked(clerkId: string, jobId: string) {
+    const url = `${API_BASE_URL}/api/recommend/disliked/check/${clerkId}/${jobId}`;
+    console.log('🔍 Checking if job is disliked:', url);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Failed to check job dislike status: ${response.statusText}`);
+    const data = await response.json();
+    console.log('✅ Job dislike check result:', data);
     return data;
   },
 

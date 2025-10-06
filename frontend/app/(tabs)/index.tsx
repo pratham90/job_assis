@@ -31,7 +31,6 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 
-// Types
 interface Job {
   id: string;
   title: string;
@@ -49,7 +48,6 @@ interface Job {
   experience: string;
 }
 
-// Export interfaces and types
 export interface JobSwipeCardProps {
   job: Job;
   onSwipeLeft: () => void;
@@ -63,16 +61,13 @@ const { width, height } = Dimensions.get("window");
 const SWIPE_THRESHOLD = 100;
 
 export default function SeekerJobs() {
-  // Swipe limit states
   const [swipeLimit, setSwipeLimit] = useState<number>(20);
   const [swipeResetTime, setSwipeResetTime] = useState<Date | null>(null);
   const [userKey, setUserKey] = useState<string>("");
   const isWeb = typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
-  // Accepted jobs context
   const { addAcceptedJob } = useAcceptedJobs();
 
   // Clerk user info
-   // Clerk user info
   const { isSignedIn } = useAuth();
   const { user } = useUser();
 
@@ -257,19 +252,22 @@ export default function SeekerJobs() {
     return () => clearInterval(interval);
   }, [user?.id, isFetching]);
 
-  // Debounced effect for location changes - provides instant feedback
+  // OPTIMIZATION: Optimized debounced effect for location changes
   useEffect(() => {
     if (!user?.id) return;
+    
+    // Skip if already fetching or if location hasn't actually changed
+    if (isFetching) return;
     
     const timeoutId = setTimeout(() => {
       if (!isFetching) {
         console.log('🔄 Location changed, fetching new jobs...');
         fetchJobs(user.id);
       }
-    }, 500); // 500ms debounce
+    }, 300); // Reduced debounce for faster response
 
     return () => clearTimeout(timeoutId);
-  }, [selectedLocation]);
+  }, [selectedLocation, user?.id]); // Added user.id dependency
 
   const locations = [
     "All Locations",
