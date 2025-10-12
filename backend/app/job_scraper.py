@@ -629,12 +629,12 @@ class RedisJobDataCache:
                 db=redis_db,
                 password=redis_password,
                 decode_responses=True,
-                socket_timeout=30,              # Increased from 5s to 30s
-                socket_connect_timeout=10,      # Increased from 5s to 10s
-                retry_on_timeout=True,          # Enable retries on timeout
-                health_check_interval=30,       # Health check every 30 seconds
-                max_connections=20,             # Connection pool size
-                socket_keepalive=True           # Keep connections alive
+                socket_timeout=30,
+                socket_connect_timeout=10,
+                retry_on_timeout=True,
+                health_check_interval=30,
+                max_connections=20,
+                socket_keepalive=True
             )
 
             for attempt in range(max_retries):
@@ -646,7 +646,7 @@ class RedisJobDataCache:
                     if attempt == max_retries - 1:
                         raise
                     logger.warning(f"Redis connection attempt {attempt + 1} failed: {str(e)}. Retrying...")
-                    time.sleep(2 ** attempt)  # Exponential backoff
+                    time.sleep(2 ** attempt)
 
         except Exception as e:
             logger.error(f"Failed to connect to Redis after {max_retries} attempts: {str(e)}")
@@ -697,112 +697,41 @@ class RedisJobDataCache:
             job_id = job_data['job_id']
             location = job_data.get('location', '').lower()
 
-            # Determine country clusters (can be multiple)
-            clusters = []
-
-            # Check for USA
-            usa_keywords = ['usa', 'us', 'united states', 'california', 'new york', 'texas',
-                           'washington', 'massachusetts', 'illinois', 'colorado', 'florida',
-                           'san francisco', 'los angeles', 'seattle', 'chicago', 'boston',
-                           'atlanta', 'denver', 'miami', 'phoenix', 'remote']
-
-            # Check for India
-            india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru',
-                             'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad',
-                             'gurgaon', 'noida', 'kochi']
-
-            if any(keyword in location for keyword in usa_keywords):
-<<<<<<< HEAD
+            # Determine country
+            if any(keyword in location for keyword in ['usa', 'us', 'united states']):
                 country = 'usa'
-                print(f"🇺🇸 Job '{job_data.get('title', '')}' detected as USA job (location: '{location}')")
-            elif any(keyword in location for keyword in india_keywords):
+            elif any(keyword in location for keyword in ['india', 'mumbai', 'delhi', 'bangalore']):
                 country = 'india'
-                print(f"🇮🇳 Job '{job_data.get('title', '')}' detected as India job (location: '{location}')")
             else:
-                print(f"🌍 Job '{job_data.get('title', '')}' detected as global job (location: '{location}')")
-            
-            # Create cluster-based storage system
-            # Store job data with simple key
-            redis_key = f"job:{job_id}"
-            
-            # Add job to country-specific cluster
-            cluster_key = f"cluster:{country}:jobs"
-=======
-                clusters.append('usa')
-
-            if any(keyword in location for keyword in india_keywords):
-                clusters.append('india')
-
-            # Always add to global cluster
-            clusters.append('global')
-
-            # If no specific cluster matched, ensure it's in global
-            if len(clusters) == 1:  # Only 'global'
                 country = 'global'
-            else:
-                country = clusters[0] if clusters[0] != 'global' else clusters[1]
->>>>>>> 874fc96dd388dab82bb16d521bad8171016e454a
+
+            # Create cluster-based storage system
+            redis_key = f"job:{job_id}"
+            cluster_key = f"cluster:{country}:jobs"
 
             # Prepare job fields for Redis Hash
-            redis_key = f"job:{job_id}"
             redis_fields = {
                 'title': job_data.get('title', ''),
                 'company': job_data.get('company', ''),
-                'skills': json.dumps(job_data.get('skills', [])),
-                'salary': job_data.get('salary', ''),
-                'location': job_data.get('location', ''),
+                'location': location,
                 'country': country,
                 'job_type': job_data.get('job_type', ''),
-                'experience_level': job_data.get('experience_level', ''),
-                'category': job_data.get('category', ''),
-                'posted_date': job_data.get('posted_date', ''),
-                'url': job_data.get('job_url', ''),
-                'job_id': job_id,
+                'skills': json.dumps(job_data.get('skills', [])),
                 'requirements': json.dumps(job_data.get('requirements', [])),
-                'responsibilities': job_data.get('description', ''),
-                'employment_type': job_data.get('employment_type', ''),
-                'remote': self._determine_remote_status(job_data),
-                'is_trusted_company': str(job_data.get('is_trusted_company', False)),
+                'description': job_data.get('description', ''),
+                'job_id': job_id,
                 'created_at': datetime.now().isoformat(),
                 'expires_at': (datetime.now() + timedelta(seconds=self.cache_duration_seconds)).isoformat()
             }
-<<<<<<< HEAD
-            
-            # Concurrent Redis operations with connection pooling
-            
-            # Use connection pool for concurrent operations
+
+            # Use pipeline for atomic operations
             pipeline = self.redis_client.pipeline()
-            
-            # Save job data to Redis Hash
             pipeline.hset(redis_key, mapping=redis_fields)
             pipeline.expire(redis_key, self.cache_duration_seconds)
-            
-            # Add job ID to country-specific cluster only
             pipeline.sadd(cluster_key, job_id)
             pipeline.expire(cluster_key, self.cache_duration_seconds)
-            
-            print(f"📦 Adding job '{job_data.get('title', '')}' to cluster: {cluster_key}")
-            
-            # Execute all operations in one batch with timeout
             pipeline.execute()
-            
-=======
 
-            # Save job data to Redis Hash
-            self.redis_client.hset(redis_key, mapping=redis_fields)
-            self.redis_client.expire(redis_key, self.cache_duration_seconds)
-
-            # Add job ID to ALL relevant clusters
-            for cluster in clusters:
-                cluster_key = f"cluster:{cluster}:jobs"
-                self.redis_client.sadd(cluster_key, job_id)
-
-                # Only set expire if cluster is new (check if it exists first)
-                if self.redis_client.ttl(cluster_key) == -1:
-                    self.redis_client.expire(cluster_key, self.cache_duration_seconds)
-
-            logger.info(f"Saved job {job_id} to clusters: {', '.join(clusters)}")
->>>>>>> 874fc96dd388dab82bb16d521bad8171016e454a
             return True
 
         except Exception as e:
@@ -905,7 +834,7 @@ class RedisJobDataCache:
                 'title': redis_job_data.get('title', ''),
                 'company': redis_job_data.get('company', ''),
                 'location': redis_job_data.get('location', ''),
-                'description': redis_job_data.get('responsibilities', ''),
+                'description': redis_job_data.get('description', ''),
                 'requirements': json.loads(redis_job_data.get('requirements', '[]')),
                 'job_type': redis_job_data.get('job_type', ''),
                 'skills': json.loads(redis_job_data.get('skills', '[]')),
@@ -939,8 +868,8 @@ class RedisJobDataCache:
                         expires_at = datetime.fromisoformat(search_data)
                         if current_time > expires_at:
                             expired_searches.append(search_key)
-                    except:
-                        expired_searches.append(search_key)  # Invalid date format
+                    except Exception:
+                        expired_searches.append(search_key)
             
             # Clear expired searches
             for search_key in expired_searches:
@@ -955,8 +884,8 @@ class RedisJobDataCache:
                         expires_at = datetime.fromisoformat(expires_at_str)
                         if current_time > expires_at:
                             expired_jobs.append(job_key)
-                    except:
-                        expired_jobs.append(job_key)  # Invalid date format
+                    except Exception:
+                        expired_jobs.append(job_key)
             
             # Remove expired job hashes
             for job_key in expired_jobs:
@@ -1063,7 +992,7 @@ class RedisJobDataCache:
                 'redis_memory_used_mb': round(used_memory / (1024 * 1024), 2),
                 'redis_connected': True,
                 'cache_duration_hours': self.cache_duration_seconds // 3600,
-                'searches': search_details[:10]  # Limit to first 10 for display
+                'searches': search_details[:10]
             }
             
         except Exception as e:
@@ -1283,7 +1212,7 @@ class RedisCachedJobScraper:
                     continue
             
             # Location match
-            if location and location.lower() != "India":
+            if location and location.lower() != "india":
                 if location_lower not in job.get('location', '').lower():
                     continue
             
@@ -1335,7 +1264,7 @@ class RedisCachedJobScraper:
         """Clear cache"""
         if expired_only:
             self.cache.clear_expired_cache()
-            return 0  # clear_expired_cache doesn't return count
+            return 0
         else:
             return self.cache.clear_all_cache()
     

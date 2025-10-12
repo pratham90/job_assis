@@ -25,6 +25,12 @@ class SwipeRequest(BaseModel):
 class CreateUserRequest(BaseModel):
     clerk_id: str
     email: str
+    first_name: str = ""
+    last_name: str = ""
+    role: str = "job_seeker"
+    skills: List[str] | None = None
+    location: str | None = None
+    company_name: str | None = None
 
 class RemoveSavedRequest(BaseModel):
     user_id: str
@@ -442,7 +448,7 @@ async def get_recommendations(
         
         print(f"📊 Final job count: {len(filtered_job_models)} jobs")
 
-        # 7. Generate recommendations (no swipes needed, filtering done via MongoDB)
+        # 8. Generate recommendations (no swipes needed, filtering done via MongoDB)
         print(f"🤖 Generating recommendations using AI...")
         recommendations = await recommender.recommend(
             user_model, filtered_job_models, []
@@ -462,7 +468,7 @@ async def get_recommendations(
         print(f"\n✅ Returning {min(len(recommendations), limit)} recommendations")
         print(f"=====================================")
         
-        # 7. Enqueue remaining related jobs (beyond the first page)
+        # 9. Enqueue remaining related jobs (beyond the first page)
         try:
             # Map id->original dict for queuing
             id_to_dict = {}
@@ -488,7 +494,7 @@ async def get_recommendations(
         except Exception as e:
             print(f"Queueing related jobs failed: {e}")
 
-        # 8. Return top N recommendations
+        # 10. Return top N recommendations
         return [
             JobRecommendation(job=job, match_score=score)
             for job, score in recommendations[:limit]
@@ -500,7 +506,7 @@ async def get_recommendations(
 
 @router.post("/swipe")
 async def handle_swipe_action(request: SwipeRequest):
-    """Handle user swipe actions (like, dislike, save)"""
+    """Handle user swipe actions (like, dislike, save) with daily limit enforcement"""
     try:
         logger.info(f"👆 Swipe action: {request.action} (user={request.user_id[:8]}..., job={request.job_id[:8]}...)")
         
@@ -509,7 +515,25 @@ async def handle_swipe_action(request: SwipeRequest):
         if request.action not in valid_actions:
             raise HTTPException(status_code=400, detail=f"Invalid action. Must be one of: {valid_actions}")
         
-        # Persist all actions (save, like, dislike) directly to MongoDB (no Redis)
+        # Check swipe limit before processing the action
+        limit_check = await db.check_and_increment_swipe_limit(request.user_id)
+        
+        if not limit_check.get("allowed", False):
+            logger.warning(f"🚫 User {request.user_id[:8]}... exceeded daily swipe limit")
+            raise HTTPException(
+                status_code=429,  # Too Many Requests
+                detail={
+                    "error": "Daily swipe limit reached",
+                    "message": f"You've reached your daily limit of {limit_check.get('limit', 20)} swipes",
+                    "remaining": limit_check.get("remaining", 0),
+                    "reset_at": limit_check.get("reset_at").isoformat() if limit_check.get("reset_at") else None,
+                    "total_today": limit_check.get("total_today", 0)
+                }
+            )
+        
+        logger.info(f"✅ Swipe allowed. Remaining today: {limit_check.get('remaining', 0)}")
+        
+        # Persist all actions (save, like, dislike) directly to MongoDB
         if request.action in ["save", "like", "super_like", "dislike"]:
             # Try to attach job snapshot for rich views
             job_snapshot = None
@@ -530,7 +554,13 @@ async def handle_swipe_action(request: SwipeRequest):
             "success": True,
             "message": f"Job {request.action} successfully",
             "action": request.action,
-            "job_id": request.job_id
+            "job_id": request.job_id,
+            "swipe_limit": {
+                "remaining": limit_check.get("remaining", 0),
+                "total_today": limit_check.get("total_today", 0),
+                "limit": limit_check.get("limit", 20),
+                "reset_at": limit_check.get("reset_at").isoformat() if limit_check.get("reset_at") else None
+            }
         }
         
     except HTTPException:
@@ -580,9 +610,6 @@ async def remove_saved_job(req: RemoveSavedRequest):
     except Exception as e:
         logger.error(f"❌ Error removing saved job: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to remove saved job: {str(e)}")
-
-# New endpoints for separate collections
-
 
 @router.get("/disliked/{clerk_id}")
 async def get_disliked_jobs(clerk_id: str):

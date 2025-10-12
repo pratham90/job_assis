@@ -6,7 +6,7 @@ import redis.asyncio as redis
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 import asyncio
 import concurrent.futures
@@ -68,6 +68,182 @@ class Database:
         logger.info(f"   💾 Cache: In-memory with 5min TTL")
         logger.info(f"   🚀 Environment: Vercel serverless")
     
+    # ===== NEW: SWIPE LIMIT TRACKING METHODS =====
+    
+    async def check_and_increment_swipe_limit(self, user_id: str) -> dict:
+        """
+        Check if user has reached daily swipe limit (20 swipes per 24 hours).
+        If not, increment the swipe count.
+        Returns: {
+            "allowed": bool,
+            "remaining": int,
+            "reset_at": datetime,
+            "total_today": int
+        }
+        """
+        try:
+            collection = self.users_db.user_swipe_limits
+            now = datetime.utcnow()
+            today_start = datetime(now.year, now.month, now.day)  # Midnight UTC
+            tomorrow_start = today_start + timedelta(days=1)
+            
+            # Find or create today's swipe limit document
+            swipe_doc = await collection.find_one({
+                "user_id": user_id,
+                "date": today_start
+            })
+            
+            if not swipe_doc:
+                # Create new document for today
+                swipe_doc = {
+                    "user_id": user_id,
+                    "date": today_start,
+                    "swipe_count": 0,
+                    "reset_at": tomorrow_start,
+                    "created_at": now,
+                    "updated_at": now
+                }
+                await collection.insert_one(swipe_doc)
+                logger.info(f"📊 Created new swipe limit document for user: {user_id[:8]}...")
+            
+            current_count = swipe_doc.get("swipe_count", 0)
+            limit = 20
+            
+            # Check if limit reached
+            if current_count >= limit:
+                logger.warning(f"🚫 User {user_id[:8]}... reached daily swipe limit ({current_count}/{limit})")
+                return {
+                    "allowed": False,
+                    "remaining": 0,
+                    "reset_at": tomorrow_start,
+                    "total_today": current_count,
+                    "limit": limit
+                }
+            
+            # Increment swipe count
+            result = await collection.update_one(
+                {"user_id": user_id, "date": today_start},
+                {
+                    "$inc": {"swipe_count": 1},
+                    "$set": {"updated_at": now}
+                }
+            )
+            
+            new_count = current_count + 1
+            remaining = limit - new_count
+            
+            logger.info(f"✅ Swipe counted: user={user_id[:8]}..., count={new_count}/{limit}, remaining={remaining}")
+            
+            return {
+                "allowed": True,
+                "remaining": remaining,
+                "reset_at": tomorrow_start,
+                "total_today": new_count,
+                "limit": limit
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to check/increment swipe limit: {e}")
+            # On error, allow the swipe (fail-open approach)
+            return {
+                "allowed": True,
+                "remaining": 20,
+                "reset_at": datetime.utcnow() + timedelta(days=1),
+                "total_today": 0,
+                "limit": 20,
+                "error": str(e)
+            }
+    
+    async def get_swipe_limit_status(self, user_id: str) -> dict:
+        """
+        Get current swipe limit status for a user without incrementing.
+        Returns: {
+            "remaining": int,
+            "total_today": int,
+            "limit": int,
+            "reset_at": datetime
+        }
+        """
+        try:
+            collection = self.users_db.user_swipe_limits
+            now = datetime.utcnow()
+            today_start = datetime(now.year, now.month, now.day)
+            tomorrow_start = today_start + timedelta(days=1)
+            
+            swipe_doc = await collection.find_one({
+                "user_id": user_id,
+                "date": today_start
+            })
+            
+            limit = 20
+            total_today = swipe_doc.get("swipe_count", 0) if swipe_doc else 0
+            remaining = max(0, limit - total_today)
+            
+            return {
+                "remaining": remaining,
+                "total_today": total_today,
+                "limit": limit,
+                "reset_at": tomorrow_start
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to get swipe limit status: {e}")
+            return {
+                "remaining": 20,
+                "total_today": 0,
+                "limit": 20,
+                "reset_at": datetime.utcnow() + timedelta(days=1),
+                "error": str(e)
+            }
+    
+    async def reset_old_swipe_limits(self):
+        """
+        Cleanup old swipe limit documents (older than 7 days).
+        This can be called periodically or on server startup.
+        """
+        try:
+            collection = self.users_db.user_swipe_limits
+            cutoff_date = datetime.utcnow() - timedelta(days=7)
+            
+            result = await collection.delete_many({
+                "date": {"$lt": cutoff_date}
+            })
+            
+            if result.deleted_count > 0:
+                logger.info(f"🧹 Cleaned up {result.deleted_count} old swipe limit documents")
+            
+            return result.deleted_count
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to reset old swipe limits: {e}")
+            return 0
+    
+    async def ensure_swipe_limit_indexes(self):
+        """Create indexes for swipe limit collection"""
+        try:
+            collection = self.users_db.user_swipe_limits
+            
+            # Compound index on user_id and date for fast lookups
+            await collection.create_index(
+                [("user_id", 1), ("date", 1)],
+                unique=True,
+                name="user_date_unique"
+            )
+            logger.info("   ✅ Unique compound index: (user_id, date) for swipe limits")
+            
+            # TTL index to auto-delete old documents after 7 days
+            await collection.create_index(
+                [("date", 1)],
+                expireAfterSeconds=7*24*3600,  # 7 days in seconds
+                name="date_ttl"
+            )
+            logger.info("   ✅ TTL index: date (7 days) for auto-cleanup")
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Swipe limit index creation warning: {e}")
+    
+    # ===== END OF NEW SWIPE LIMIT METHODS =====
+    
     def _get_cache_key(self, prefix: str, *args) -> str:
         """Generate cache key from prefix and arguments"""
         return f"{prefix}:{':'.join(str(arg) for arg in args)}"
@@ -111,7 +287,7 @@ class Database:
         return user
     
     async def ensure_indexes(self):
-        """Create unique indexes to prevent duplicate job actions"""
+        """Create unique indexes to prevent duplicate job actions and setup swipe limits"""
         try:
             # Create unique compound index on user_job_actions collection
             # This ensures no duplicate (user_id, job_id, action) combinations
@@ -135,6 +311,9 @@ class Database:
                 name="action_index"
             )
             logger.info("   ✅ Index: action")
+            
+            # NEW: Ensure swipe limit indexes
+            await self.ensure_swipe_limit_indexes()
             
         except Exception as e:
             logger.warning(f"⚠️  Index creation warning (indexes may already exist): {e}")
@@ -515,22 +694,6 @@ class Database:
                         # Enhanced location matching for USA and India
                         if location_lower == "usa":
                             usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
-                                          'texas', 'washington', 'massachusetts', 'illinois', 'colorado',
-                                          ', ca', ', ny', ', tx', 'san francisco', 'los angeles', 'seattle']
-                            if not any(keyword in job_location for keyword in usa_keywords):
-                                continue  # Skip this job
-                            # Exclude jobs that also contain India keywords
-                            india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
-                                            'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
-                            if any(india_keyword in job_location for india_keyword in india_keywords):
-                                continue  # Skip this job
-                        elif location_lower == "india":
-                            india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
-                                            'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
-                            if not any(keyword in job_location for keyword in india_keywords):
-                                continue  # Skip this job
-                            # Exclude jobs that also contain USA keywords
-                            usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
                                           'texas', 'washington', 'massachusetts', 'illinois', 'colorado']
                             if any(usa_keyword in job_location for usa_keyword in usa_keywords):
                                 continue  # Skip this job
@@ -866,6 +1029,7 @@ class Database:
         except Exception as e:
             logger.error(f"Error converting job data: {e}")
             return None
+    
     def _convert_jobs_lists_job(self, job_data: dict) -> dict:
         """Convert jobs-lists collection job data to our expected format"""
         try:
@@ -903,7 +1067,7 @@ class Database:
                 "benefits": [],
                 "is_active": True,
                 "posted_at": job_data.get("posted_at", job_data.get("created_at", "2024-01-01")),
-                "expires_at": None,  # Make it optional to avoid validation errors
+                "expires_at": None,
                 "category": job_data.get("category", ""),
                 "source": job_data.get("source", "jobs_lists"),
                 "company": job_data.get("company", ""),
@@ -941,7 +1105,7 @@ class Database:
                 "benefits": [],
                 "is_active": True,
                 "posted_at": job_data.get("created_at", "2024-01-01"),
-                "expires_at": None,  # Make it optional to avoid validation errors
+                "expires_at": None,
                 "category": job_data.get("category", ""),
                 "source": job_data.get("source", "Manual"),
                 "job_link": job_data.get("job_link", ""),
@@ -1041,8 +1205,8 @@ class Database:
                 "skills_required": skills if skills else [],
                 "benefits": [],
                 "is_active": True,
-                "posted_at": posted_at,  # Use the parsed datetime
-                "expires_at": expires_at,  # Use the parsed datetime
+                "posted_at": posted_at,
+                "expires_at": expires_at,
                 "company": job_data.get('company', 'Unknown Company'),
                 "url": job_data.get('url', ''),
                 "experience_level": job_data.get('experience_level', 'Not specified'),
@@ -1231,6 +1395,7 @@ class Database:
             import traceback
             traceback.print_exc()
             return False
+    
     async def save_job_dislike(self, user_id: str, job_id: str) -> bool:
         """Save job dislike with minimal data to users_job_dislike collection."""
         try:
@@ -1328,6 +1493,7 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Failed to remove job like: {e}")
             return False
+    
     async def remove_job_dislike(self, user_id: str, job_id: str) -> bool:
         """Remove a job dislike for a user from users_job_dislike collection."""
         try:
