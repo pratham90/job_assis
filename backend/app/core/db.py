@@ -498,444 +498,313 @@ class Database:
                             category_filter: str = None,
                             trusted_only: bool = True,
                             force_scrape: bool = False) -> List[dict]:
-        """Get all active job postings with 3-step priority and loop prevention"""
-        # Performance monitoring
+        """Get all active job postings with optimized All Locations support"""
         start_time = time.time()
         all_jobs = []
         
-        print(f"🎯 Starting 3-step job search (limit: {limit})")
-        print(f"   Keywords: {keywords}, Location: {location}")
+        # Normalize location input
+        is_all_locations = (
+            not location or 
+            location.strip() == "" or 
+            location.lower() in ["all locations", "all", "global"]
+        )
+        
+        print(f"🎯 Starting job search (limit: {limit})")
+        print(f"   Keywords: {keywords}, Location: {'All Locations' if is_all_locations else location}")
         print(f"   Filters: job_type={job_type_filter}, category={category_filter}, trusted={trusted_only}")
         
-        # ============= STEP 1: CONCURRENT MONGODB JOBS =============
+        # ============= STEP 1: MONGODB JOBS (Jobs/jobs-lists) =============
         try:
-            print(f"\n📋 STEP 1: Concurrent fetching jobs from Jobs/jobs-lists collection...")
+            print(f"\n📋 STEP 1: Fetching from MongoDB Jobs/jobs-lists...")
             posted_jobs = await self.mongo_db["jobs-lists"].find(
-                {"is_active": {"$ne": False}},  # Get active jobs
+                {"is_active": {"$ne": False}},
                 {
                     "_id": 1, "employer_id": 1, "title": 1, "description": 1,
-                    "employment_type": 1, "location": 1, "skills_required": 1, "requirements": 1,
-                    "category": 1, "source": 1, "created_at": 1, "posted_at": 1,
-                    "salary": 1, "company": 1, "url": 1, "experience_level": 1
+                    "employment_type": 1, "location": 1, "skills_required": 1, 
+                    "requirements": 1, "category": 1, "source": 1, "created_at": 1, 
+                    "posted_at": 1, "salary": 1, "company": 1, "url": 1, "experience_level": 1
                 }
-            ).to_list(100)
+            ).to_list(200)  # Increased limit for all locations
             
-            print(f"✅ Found {len(posted_jobs)} jobs in Jobs/jobs-lists collection")
+            print(f"✅ Found {len(posted_jobs)} jobs in MongoDB")
             
-            # ADVANCED OPTIMIZATION: Parallel job processing
+            # Parallel processing
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-                job_futures = []
-                for job_data in posted_jobs:
-                    future = executor.submit(self._convert_jobs_lists_job, job_data)
-                    job_futures.append(future)
+                job_futures = [executor.submit(self._convert_jobs_lists_job, job_data) 
+                              for job_data in posted_jobs]
                 
-                processed_jobs = []
                 for future in concurrent.futures.as_completed(job_futures):
                     converted_job = future.result()
                     if converted_job:
+                        # Apply location filter if NOT "All Locations"
+                        if not is_all_locations:
+                            if not self._matches_location_filter(converted_job, location):
+                                continue
+                        
                         converted_job["source"] = "jobs_lists"
                         converted_job["priority"] = 1.0
-                        processed_jobs.append(converted_job)
-                
-                all_jobs.extend(processed_jobs)
-                    
-            print(f"✅ Successfully processed {len([j for j in all_jobs if j.get('source') == 'jobs_lists'])} jobs from jobs-lists")
+                        all_jobs.append(converted_job)
+            
+            print(f"✅ Processed {len(all_jobs)} MongoDB jobs")
             
         except Exception as e:
-            print(f"❌ Error fetching jobs from Jobs/jobs-lists: {e}")
+            print(f"❌ Error fetching MongoDB jobs: {e}")
         
-        # ============= STEP 2: GET CACHED JOBS FROM REDIS =============
+        # ============= STEP 2: REDIS CACHED JOBS =============
         remaining_needed = limit - len(all_jobs)
+        
         if remaining_needed > 0:
             try:
-                print(f"\n🔄 STEP 2: Fetching cached jobs from Redis (need {remaining_needed} more)...")
+                print(f"\n🔄 STEP 2: Fetching from Redis (need {remaining_needed} more)...")
                 
-                # Determine which cluster to fetch from based on location
-                cluster_name = None
                 job_ids = []
                 
-                if location and location.strip():
+                if is_all_locations:
+                    # **KEY FIX**: Fetch from ALL clusters for "All Locations"
+                    print(f"📍 All Locations mode - fetching from ALL clusters")
+                    
+                    clusters_to_fetch = ["usa", "india", "global"]
+                    
+                    # Fetch job IDs from all clusters concurrently
+                    async def fetch_cluster_jobs(cluster_name):
+                        cluster_key = f"cluster:{cluster_name}:jobs"
+                        try:
+                            cluster_job_ids = await self.redis_client.smembers(cluster_key)
+                            ids = [job_id.decode('utf-8') if isinstance(job_id, bytes) else job_id 
+                                   for job_id in cluster_job_ids]
+                            print(f"   📊 {cluster_name}: {len(ids)} jobs")
+                            return ids
+                        except Exception as e:
+                            print(f"   ⚠️  Error fetching {cluster_name} cluster: {e}")
+                            return []
+                    
+                    # Fetch all clusters in parallel
+                    cluster_results = await asyncio.gather(
+                        *[fetch_cluster_jobs(cluster) for cluster in clusters_to_fetch]
+                    )
+                    
+                    # Combine and deduplicate job IDs
+                    for cluster_ids in cluster_results:
+                        job_ids.extend(cluster_ids)
+                    
+                    job_ids = list(set(job_ids))  # Remove duplicates
+                    print(f"✅ Total unique jobs across all clusters: {len(job_ids)}")
+                    
+                else:
+                    # Location-specific cluster fetch
                     location_lower = location.lower()
                     
-                    # Map location to cluster name
-                    if location_lower == "usa" or any(keyword in location_lower for keyword in ['united states', 'us', 'california', 'new york', 'texas']):
+                    if any(kw in location_lower for kw in ['usa', 'united states', 'us']):
                         cluster_name = "usa"
-                    elif location_lower == "india" or any(keyword in location_lower for keyword in ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru']):
+                    elif any(kw in location_lower for kw in ['india', 'mumbai', 'delhi', 'bangalore']):
                         cluster_name = "india"
-                    elif location_lower in ["all locations", "all", "global"]:
-                        cluster_name = "global"
                     else:
-                        # Try to match with available clusters or default to global
                         cluster_name = "global"
-                else:
-                    # Default to global cluster if no location specified
-                    cluster_name = "global"
-                
-                # Fetch job IDs from the appropriate cluster
-                cluster_key = f"cluster:{cluster_name}:jobs"
-                print(f"📍 Fetching from Redis key: {cluster_key}")
-                
-                # Use SMEMBERS to get all job IDs from the SET
-                cluster_job_ids = await self.redis_client.smembers(cluster_key)
-                job_ids = [job_id.decode('utf-8') if isinstance(job_id, bytes) else job_id for job_id in cluster_job_ids]
-                
-                print(f"📊 Found {len(job_ids)} job IDs in '{cluster_name}' cluster")
-                
-                # Fallback: If no jobs found in specific cluster, try global cluster
-                if len(job_ids) == 0 and cluster_name != "global":
-                    print(f"⚠️ No jobs in {cluster_name} cluster, falling back to global cluster")
-                    cluster_key = "cluster:global:jobs"
+                    
+                    cluster_key = f"cluster:{cluster_name}:jobs"
+                    print(f"📍 Fetching from cluster: {cluster_name}")
+                    
                     cluster_job_ids = await self.redis_client.smembers(cluster_key)
-                    job_ids = [job_id.decode('utf-8') if isinstance(job_id, bytes) else job_id for job_id in cluster_job_ids]
-                    print(f"📊 Found {len(job_ids)} job IDs in global cluster (fallback)")
+                    job_ids = [job_id.decode('utf-8') if isinstance(job_id, bytes) else job_id 
+                              for job_id in cluster_job_ids]
+                    
+                    print(f"📊 Found {len(job_ids)} jobs in {cluster_name} cluster")
                 
-                print(f"🎯 Need {remaining_needed} more jobs to reach limit of {limit}")
+                # Process jobs in chunks
+                max_jobs_to_process = min(len(job_ids), remaining_needed * 2)  # Fetch extra for filtering
+                chunk_size = 25
+                job_chunks = [job_ids[i:i + chunk_size] 
+                             for i in range(0, max_jobs_to_process, chunk_size)]
                 
-                # OPTIMIZATION: Respect the limit - only process what we actually need
-                max_jobs_to_process = min(len(job_ids), remaining_needed)  # Only process what we need
-                print(f"📋 Will process exactly {max_jobs_to_process} jobs (respecting limit)")
-                
-                # Split job IDs into chunks for parallel processing
-                chunk_size = min(25, max_jobs_to_process)  # Smaller chunks for better control
-                job_chunks = [job_ids[i:i + chunk_size] for i in range(0, max_jobs_to_process, chunk_size)]
-                
-                # Concurrent Redis operations using asyncio
-                
+                # Concurrent Redis fetch
                 async def fetch_job_chunk(chunk):
-                    """Fetch a chunk of jobs concurrently"""
                     pipeline = self.redis_client.pipeline()
-                    job_keys = [f"job:{job_id}" for job_id in chunk]
-                    
-                    for job_key in job_keys:
-                        pipeline.hgetall(job_key)
-                    
+                    for job_id in chunk:
+                        pipeline.hgetall(f"job:{job_id}")
                     return await pipeline.execute()
                 
-                # Execute all chunks concurrently
                 chunk_results = await asyncio.gather(*[fetch_job_chunk(chunk) for chunk in job_chunks])
                 
                 # Flatten results
-                job_data_list = []
-                for chunk_result in chunk_results:
-                    job_data_list.extend(chunk_result)
+                job_data_list = [job_data for chunk_result in chunk_results for job_data in chunk_result]
                 
-                print(f"📊 Processing {len(job_data_list)} job data entries")
+                print(f"📊 Processing {len(job_data_list)} Redis jobs")
                 
-                # Parallel job processing with threading
-                
-                seen_job_ids = set()  # Track processed job IDs
-                processed_jobs = []
+                # Parallel processing with deduplication
+                seen_job_ids = set()
                 seen_job_ids_lock = threading.Lock()
                 
                 def process_job_batch(job_batch):
-                    """Process a batch of jobs in parallel"""
                     batch_results = []
-                    
                     for job_data in job_batch:
                         if not job_data:
                             continue
-                            
+                        
                         job_id = job_data.get('job_id', '')
                         
-                        # Thread-safe duplicate check
                         with seen_job_ids_lock:
                             if job_id in seen_job_ids:
                                 continue
                             seen_job_ids.add(job_id)
                         
-                        # Convert Redis job
                         converted_job = self._convert_scraped_job(job_data)
                         if converted_job:
+                            # Apply location filter if NOT "All Locations"
+                            if not is_all_locations:
+                                if not self._matches_location_filter(converted_job, location):
+                                    continue
+                            
+                            converted_job["source"] = "scraped"
+                            converted_job["priority"] = 0.7
                             batch_results.append(converted_job)
                     
                     return batch_results
                 
-                # Split job data into batches for parallel processing
+                # Process in parallel
                 batch_size = 20
-                job_batches = [job_data_list[i:i + batch_size] for i in range(0, len(job_data_list), batch_size)]
+                job_batches = [job_data_list[i:i + batch_size] 
+                              for i in range(0, len(job_data_list), batch_size)]
                 
-                # Process batches in parallel using ThreadPoolExecutor
                 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                    batch_futures = [executor.submit(process_job_batch, batch) for batch in job_batches]
+                    batch_futures = [executor.submit(process_job_batch, batch) 
+                                   for batch in job_batches]
                     
                     for future in concurrent.futures.as_completed(batch_futures):
-                        batch_results = future.result()
-                        processed_jobs.extend(batch_results)
+                        all_jobs.extend(future.result())
                 
-                # Apply location filtering to all processed jobs
-                filtered_jobs = []
-                print(f"🔍 DEBUG: location='{location}', type={type(location)}, strip='{location.strip() if location else 'None'}'")
-                print(f"🔍 Processing {len(processed_jobs)} jobs for location filtering...")
-                
-                for converted_job in processed_jobs:
-                    # Check if we should apply location filtering
-                    # "All Locations" comes as None or empty string from frontend
-                    should_filter = (location is not None and 
-                                   location.strip() and 
-                                   location.lower() not in ["all locations", "all"] and
-                                   location.strip() != "")
-                    
-                    if should_filter:
-                        location_lower = location.lower()
-                        
-                        # Handle location data format (could be dict or string)
-                        job_location_raw = converted_job.get('location', '')
-                        if isinstance(job_location_raw, dict):
-                            # Extract location string from dict
-                            parts = [
-                                str(job_location_raw.get('city', '')),
-                                str(job_location_raw.get('state', '')),
-                                str(job_location_raw.get('country', ''))
-                            ]
-                            job_location = ' '.join(parts).lower()
-                        else:
-                            job_location = str(job_location_raw).lower()
-                        
-                        # Enhanced location matching for USA and India
-                        if location_lower == "usa":
-                            usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
-                                          'texas', 'washington', 'massachusetts', 'illinois', 'colorado']
-                            if any(usa_keyword in job_location for usa_keyword in usa_keywords):
-                                continue  # Skip this job
-                        else:
-                            # Generic location matching
-                            if location_lower not in job_location and "remote" not in job_location:
-                                continue  # Skip this job
-                    
-                        # Job passed location filter, add it to filtered list
-                        converted_job["source"] = "scraped"
-                        converted_job["priority"] = 0.7
-                        filtered_jobs.append(converted_job)
-                    else:
-                        # For "All Locations", include all jobs without filtering
-                        converted_job["source"] = "scraped"
-                        converted_job["priority"] = 0.7
-                        filtered_jobs.append(converted_job)
-                
-                # Add all filtered jobs to the main list
-                all_jobs.extend(filtered_jobs)
-                scraped_count = len(filtered_jobs)
-                
-                print(f"✅ Location filter: '{location}' - Applied filtering")
-                print(f"📊 Processed {len(processed_jobs)} jobs → {len(filtered_jobs)} passed location filter")
-                
-                print(f"✅ Successfully processed {scraped_count} cached Redis jobs from {cluster_name} cluster")
+                print(f"✅ Processed {len(all_jobs) - len([j for j in all_jobs if j.get('source') == 'jobs_lists'])} Redis jobs")
                 
             except Exception as e:
-                print(f"❌ Error fetching cached jobs from Redis: {e}")
+                print(f"❌ Error fetching Redis jobs: {e}")
         
-        # ============= STEP 3: WEB SCRAPING IF NEEDED =============
+        # ============= STEP 3: WEB SCRAPING (MINIMAL) =============
         remaining_needed = limit - len(all_jobs)
         
-        # LOOP PREVENTION: Only scrape if we have very few jobs and haven't scraped recently
-        # OR if force_scrape is explicitly requested
-        # For "All Locations" (default), be more conservative about scraping
-        # OPTIMIZATION: Smart caching thresholds based on location and time
-        is_default_or_all_locations = (not location or location.strip() == "" or 
-                                      (location and location.lower() == "all locations"))
+        # Scraping threshold - much higher for "All Locations"
+        min_threshold = 50 if is_all_locations else 20
+        should_scrape = remaining_needed > 0 and len(all_jobs) < min_threshold and not is_all_locations
         
-        # Dynamic thresholds based on time of day and location
-        from datetime import datetime
-        current_hour = datetime.now().hour
-        
-        # Higher thresholds during peak hours (9 AM - 6 PM) for better performance
-        if 9 <= current_hour <= 18:
-            min_jobs_threshold = 30 if is_default_or_all_locations else max(60, limit * 0.15)
-        else:
-            min_jobs_threshold = 20 if is_default_or_all_locations else max(50, limit * 0.1)
-        should_scrape = (
-            remaining_needed > 0 and 
-            (len(all_jobs) < min_jobs_threshold or force_scrape)  # Scrape if few jobs OR force_scrape=True
-        )
-        
-        if should_scrape:
+        if should_scrape or force_scrape:
             try:
-                print(f"\n🕷️  STEP 3: Web scraping needed (need {remaining_needed} more jobs)...")
-                
+                print(f"\n🕷️  STEP 3: Web scraping...")
                 self._initialize_scraper()
                 
                 if self.scraper:
-                    print(f"🔍 Starting fresh web scraping...")
-                    print(f"   Search params: keywords='{keywords}', location='{location}'")
-                    
-                    # LIMIT SCRAPING: Cap the number of jobs to scrape
-                    max_scrape_jobs = min(remaining_needed, 100)  # Max 100 fresh jobs
-                    
-                    # Use broader search terms for LinkedIn scraping
-                    broad_keywords = "software engineer developer python javascript"
-                    
-                    # Map location filter to LinkedIn-compatible location
-                    if location and location.lower() == "usa":
-                        broad_location = "United States"
-                    elif location and location.lower() == "india":
-                        broad_location = "India"
-                    elif location and location.lower() == "all locations":
-                        # For "All Locations", don't scrape if we have enough cached jobs
-                        if len(all_jobs) >= 20:  # If we have 20+ jobs, don't scrape
-                            print(f"   Skipping scraping for 'All Locations' - have {len(all_jobs)} cached jobs")
-                            return all_jobs  # Return early without scraping
-                        broad_location = "United States"  # Default to USA for scraping
-                    else:
-                        # DEFAULT: No location specified or empty string - treat as "All Locations"
-                        if len(all_jobs) >= 20:  # If we have 20+ jobs, don't scrape
-                            print(f"   Skipping scraping for default (All Locations) - have {len(all_jobs)} cached jobs")
-                            return all_jobs  # Return early without scraping
-                        broad_location = "United States"  # Start with USA, then India if needed
-                    
-                    print(f"   Using broader terms: keywords='{broad_keywords}', location='{broad_location}'")
+                    scrape_location = "United States" if location.lower() == "usa" else location
+                    max_scrape = min(remaining_needed, 50)
                     
                     scraped_jobs = self.scraper.get_jobs(
-                        keywords=broad_keywords,
-                        location=broad_location,
-                        max_jobs=max_scrape_jobs,
+                        keywords=keywords,
+                        location=scrape_location,
+                        max_jobs=max_scrape,
                         job_type_filter=job_type_filter,
                         category_filter=category_filter,
                         trusted_only=trusted_only,
                         force_refresh=force_scrape
                     )
                     
-                    print(f"✅ Web scraping returned {len(scraped_jobs)} fresh jobs")
-                    
-                    fresh_jobs_added = 0
                     for job in scraped_jobs:
                         converted_job = self._convert_scraped_job_format(job)
                         if converted_job:
                             converted_job["source"] = "fresh_scraped"
                             converted_job["priority"] = 0.5
                             all_jobs.append(converted_job)
-                            fresh_jobs_added += 1
                     
-                    print(f"✅ Added {fresh_jobs_added} freshly scraped jobs")
-                    
-                    # ADVANCED OPTIMIZATION: Parallel scraping for "All Locations"
-                    is_all_locations = (not location or location.strip() == "" or 
-                                       (location and location.lower() == "all locations"))
-                    remaining_after_first_scrape = limit - len(all_jobs)
-                    
-                    if is_all_locations and remaining_after_first_scrape > 10 and broad_location == "United States":
-                        print(f"🔄 'All Locations' - parallel scraping from India for {remaining_after_first_scrape} more jobs...")
-                        
-                        # Parallel scraping using asyncio
-                        def scrape_india_jobs():
-                            return self.scraper.get_jobs(
-                                keywords=broad_keywords,
-                                location="India",
-                                max_jobs=min(remaining_after_first_scrape, 50),
-                                job_type_filter=job_type_filter,
-                                category_filter=category_filter,
-                                trusted_only=trusted_only,
-                                force_refresh=force_scrape
-                            )
-                        
-                        # Execute India scraping concurrently
-                        india_scraped_jobs = await asyncio.to_thread(scrape_india_jobs)
-                        
-                        print(f"✅ India scraping returned {len(india_scraped_jobs)} fresh jobs")
-                        
-                        # Parallel job processing
-                        india_jobs_added = 0
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                            job_futures = []
-                            for job in india_scraped_jobs:
-                                future = executor.submit(self._convert_scraped_job_format, job)
-                                job_futures.append(future)
-                            
-                            for future in concurrent.futures.as_completed(job_futures):
-                                converted_job = future.result()
-                                if converted_job:
-                                    converted_job["source"] = "fresh_scraped"
-                                    converted_job["priority"] = 0.5
-                                    all_jobs.append(converted_job)
-                                    india_jobs_added += 1
-                        
-                        print(f"✅ Added {india_jobs_added} India jobs")
-                    
-                else:
-                    print("❌ Web scraper not available")
-                    
+                    print(f"✅ Added {len(scraped_jobs)} fresh jobs")
             except Exception as e:
-                print(f"❌ Error during web scraping: {e}")
+                print(f"❌ Scraping error: {e}")
         else:
-            print(f"\n⏸️  STEP 3: Skipping web scraping (have {len(all_jobs)} jobs, sufficient for now)")
+            print(f"\n⏸️  STEP 3: Skipping scraping (have {len(all_jobs)} jobs)")
         
         # ============= FINAL RESULTS =============
-        print(f"\n📊 === FINAL JOB SUMMARY ===")
-        jobs_lists_count = len([j for j in all_jobs if j.get('source') == 'jobs_lists'])
-        cached_count = len([j for j in all_jobs if j.get('source') == 'scraped'])
-        fresh_count = len([j for j in all_jobs if j.get('source') == 'fresh_scraped'])
+        print(f"\n📊 === SUMMARY ===")
+        print(f"Total jobs: {len(all_jobs)}")
+        print(f"  MongoDB: {len([j for j in all_jobs if j.get('source') == 'jobs_lists'])}")
+        print(f"  Redis: {len([j for j in all_jobs if j.get('source') == 'scraped'])}")
+        print(f"  Fresh: {len([j for j in all_jobs if j.get('source') == 'fresh_scraped'])}")
+        print(f"⚡ Execution: {time.time() - start_time:.2f}s")
         
-        print(f"Total jobs found: {len(all_jobs)}")
-        print(f"  🏢 Jobs from jobs-lists (MongoDB): {jobs_lists_count}")
-        print(f"  💾 Cached jobs (Redis): {cached_count}")
-        print(f"  🌐 Fresh scraped jobs: {fresh_count}")
-        print(f"=============================")
-        
-        # Sort by priority and return limited results
+        # Sort and limit
         all_jobs.sort(key=lambda x: x.get('priority', 0), reverse=True)
-        final_jobs = all_jobs[:limit]
-        
-        # OPTIMIZATION: Performance monitoring
-        end_time = time.time()
-        execution_time = end_time - start_time
-        
-        print(f"🎯 Returning {len(final_jobs)} jobs to recommendation system")
-        print(f"⚡ Performance: {execution_time:.2f}s total execution time")
-        
-        return final_jobs
+        return all_jobs[:limit]
     
-    def _matches_search_criteria(self, job_data: dict, keywords: str, location: str, 
+    def _matches_location_filter(self, job_data: dict, location: str) -> bool:
+        """Check if a job matches the location filter"""
+        try:
+            if not location or not location.strip() or location.lower() in ["all locations", "all"]:
+                return True  # No location filter applied
+
+            location_lower = location.lower()
+
+            # Handle different location data formats
+            if isinstance(job_data.get('location'), dict):
+                # Structured location format
+                job_location_dict = job_data['location']
+                job_location_str = f"{job_location_dict.get('city', '')} {job_location_dict.get('state', '')} {job_location_dict.get('country', '')}".strip().lower()
+                is_remote = job_location_dict.get('remote', False)
+            else:
+                # String location format
+                job_location_str = str(job_data.get('location', '')).lower()
+                is_remote = "remote" in job_location_str or "hybrid" in job_location_str
+
+            # Enhanced location matching for USA and India
+            if location_lower == "usa":
+                usa_keywords = ['united states', 'usa', 'us', 'california', 'new york',
+                              'texas', 'washington', 'massachusetts', 'illinois', 'colorado',
+                              ', ca', ', ny', ', tx', 'san francisco', 'los angeles', 'seattle']
+                if not any(keyword in job_location_str for keyword in usa_keywords) and not is_remote:
+                    return False
+                # Exclude jobs that also contain India keywords
+                india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru',
+                                'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
+                if any(india_keyword in job_location_str for india_keyword in india_keywords):
+                    return False
+            elif location_lower == "india":
+                india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru',
+                                'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
+                if not any(keyword in job_location_str for keyword in india_keywords) and not is_remote:
+                    return False
+                # Exclude jobs that also contain USA keywords
+                usa_keywords = ['united states', 'usa', 'us', 'california', 'new york',
+                              'texas', 'washington', 'massachusetts', 'illinois', 'colorado']
+                if any(usa_keyword in job_location_str for usa_keyword in usa_keywords):
+                    return False
+            else:
+                # Generic location matching
+                if location_lower not in job_location_str and not is_remote:
+                    return False
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Error matching location filter: {e}")
+            return False
+
+    def _matches_search_criteria(self, job_data: dict, keywords: str, location: str,
                                job_type_filter: str, category_filter: str, trusted_only: bool) -> bool:
         """Check if a Redis job matches the search criteria"""
         try:
             # Apply location filtering for Redis jobs
-            if location and location.strip() and location.lower() not in ["all locations", "all"]:
-                location_lower = location.lower()
-                job_location = job_data.get('location', '').lower()
-                
-                # Enhanced location matching for USA and India
-                if location_lower == "usa":
-                    usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
-                                  'texas', 'washington', 'massachusetts', 'illinois', 'colorado',
-                                  ', ca', ', ny', ', tx', 'san francisco', 'los angeles', 'seattle']
-                    if not any(keyword in job_location for keyword in usa_keywords):
-                        return False
-                    # Exclude jobs that also contain India keywords
-                    india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
-                                    'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
-                    if any(india_keyword in job_location for india_keyword in india_keywords):
-                        return False
-                elif location_lower == "india":
-                    india_keywords = ['india', 'mumbai', 'delhi', 'bangalore', 'bengaluru', 
-                                    'hyderabad', 'chennai', 'pune', 'kolkata', 'ahmedabad']
-                    if not any(keyword in job_location for keyword in india_keywords):
-                        return False
-                    # Exclude jobs that also contain USA keywords
-                    usa_keywords = ['united states', 'usa', 'us', 'california', 'new york', 
-                                  'texas', 'washington', 'massachusetts', 'illinois', 'colorado']
-                    if any(usa_keyword in job_location for usa_keyword in usa_keywords):
-                        return False
-                else:
-                    # Generic location matching
-                    if location_lower not in job_location and "remote" not in job_location:
-                        return False
-            
+            if not self._matches_location_filter(job_data, location):
+                return False
+
             if job_type_filter:
                 job_type = job_data.get('employment_type', job_data.get('job_type', '')).lower()
                 if job_type_filter.lower() not in job_type:
                     return False
-            
+
             if category_filter and category_filter != 'All':
                 job_category = job_data.get('category', '')
                 if category_filter not in job_category:
                     return False
-            
+
             if trusted_only:
                 is_trusted = job_data.get('is_trusted_company', False)
                 if not is_trusted:
                     return False
-            
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Error matching search criteria: {e}")
             return False
