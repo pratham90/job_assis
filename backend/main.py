@@ -32,6 +32,14 @@ async def startup_event():
         logger.warning(f"⚠️  Index creation warning: {e}")
     
     logger.info("🔗 API endpoints registered")
+    
+    # Log all registered routes for debugging
+    logger.info("\n📋 === REGISTERED ROUTES ===")
+    for route in app.routes:
+        if hasattr(route, "path") and hasattr(route, "methods"):
+            logger.info(f"   {list(route.methods)[0]:6} {route.path}")
+    logger.info("============================\n")
+    
     logger.info("✨ Job Recommender API is ready!")
 
 @app.get("/")
@@ -60,11 +68,26 @@ async def debug_info():
                 "/debug",
                 "/api/recommend/{clerk_id}",
                 "/api/recommend/create-user",
-                "/api/recommend/swipe"
+                "/api/recommend/swipe",
+                "/api/recommend/saved/{clerk_id}",
+                "/api/recommend/liked/{clerk_id}"
             ]
         }
     except Exception as e:
         return {"error": str(e), "api_status": "error"}
+
+@app.get("/routes")
+async def list_routes():
+    """List all registered routes"""
+    routes = []
+    for route in app.routes:
+        if hasattr(route, "path"):
+            routes.append({
+                "path": route.path,
+                "name": getattr(route, "name", ""),
+                "methods": list(route.methods) if hasattr(route, "methods") else []
+            })
+    return {"routes": routes, "total": len(routes)}
 
 app.include_router(
     recommendations.router,
@@ -75,5 +98,5 @@ app.include_router(
 if __name__ == "__main__":
     import os
     import uvicorn
-    port = int(os.getenv("PORT", 3000))  # Use PORT from environment, default to 3000 if unset
-    uvicorn.run(app, host="0.0.0.0", port=port) ##Test 
+    port = int(os.getenv("PORT", 3000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
