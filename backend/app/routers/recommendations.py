@@ -2,7 +2,6 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from app.core.db import db
 from app.services.recommender import HybridRecommender
 from app.services.embeddings import EmbeddingService
-from app.services.email_service import email_service  # Import email service
 from app.models.user import UserProfile, JobSeekerCreate, EmployerCreate
 from app.models.job import JobPosting, JobRecommendation
 from app.models.swipe import UserSwipe, SwipeType
@@ -16,6 +15,16 @@ from app.utils.converter import convert_mongo_doc
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# Lazy import email service to avoid startup errors
+def get_email_service():
+    """Lazy load email service - returns None if not available"""
+    try:
+        from app.services.email_service import email_service
+        return email_service
+    except ImportError as e:
+        logger.warning(f"⚠️ Email service not available: {e}")
+        return None
 
 class SwipeRequest(BaseModel):
     user_id: str
@@ -265,29 +274,51 @@ async def get_recommendations(
                 else:
                     job_data = convert_mongo_doc(job)
                 
-                # Apply location filtering (your existing logic)
-                if location and location != "All Locations":
-                    # Your location filtering logic here...
-                    pass
-
                 job_model = JobPosting(**job_data)
                 job_models.append(job_model)
             except Exception as e:
                 print(f"❌ Skipping invalid job: {str(e)}")
                 continue
 
-        # Filter out already interacted jobs
-        liked_action_ids = await db.get_user_action_job_ids(clerk_id, ['save', 'like', 'super_like'])
-        disliked_action_ids = await db.get_user_action_job_ids(clerk_id, ['dislike'])
-
-        liked_job_ids = set(liked_action_ids)
-        disliked_job_ids = set(disliked_action_ids)
+        # Filter out already interacted jobs - Query from correct collections
+        print(f"🔍 Fetching user's interacted jobs from separate collections...")
         
-        print(f"🚫 Filtering out {len(liked_job_ids)} liked jobs and {len(disliked_job_ids)} disliked jobs")
+        # Get liked jobs from users_job_like collection
+        liked_jobs_cursor = db.users_db.users_job_like.find({"user_id": clerk_id})
+        liked_job_ids = set()
+        async for doc in liked_jobs_cursor:
+            jid = str(doc.get("job_id"))
+            if jid:
+                liked_job_ids.add(jid)
+        
+        # Get saved jobs from users_job_saved collection
+        saved_jobs_cursor = db.users_db.users_job_saved.find({"user_id": clerk_id})
+        saved_job_ids = set()
+        async for doc in saved_jobs_cursor:
+            jid = str(doc.get("job_id"))
+            if jid:
+                saved_job_ids.add(jid)
+        
+        # Get disliked jobs from users_job_dislike collection
+        disliked_jobs_cursor = db.users_db.users_job_dislike.find({"user_id": clerk_id})
+        disliked_job_ids = set()
+        async for doc in disliked_jobs_cursor:
+            jid = str(doc.get("job_id"))
+            if jid:
+                disliked_job_ids.add(jid)
+        
+        # Combine liked and saved (both should be excluded from recommendations)
+        excluded_job_ids = liked_job_ids | saved_job_ids | disliked_job_ids
+        
+        print(f"🚫 Filtering out jobs:")
+        print(f"   - Liked: {len(liked_job_ids)} jobs")
+        print(f"   - Saved: {len(saved_job_ids)} jobs")
+        print(f"   - Disliked: {len(disliked_job_ids)} jobs")
+        print(f"   - Total excluded: {len(excluded_job_ids)} jobs")
         
         filtered_job_models = []
         for job_model in job_models:
-            if job_model.id not in liked_job_ids and job_model.id not in disliked_job_ids:
+            if job_model.id not in excluded_job_ids:
                 filtered_job_models.append(job_model)
         
         print(f"📊 After filtering: {len(filtered_job_models)} jobs available")
@@ -340,9 +371,357 @@ async def get_recommendations(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Recommendation failed: {str(e)}")
 
+async def send_application_email(user_email: str, user_name: str, job_title: str, company_name: str, job_location: str):
+    """Send application confirmation email in the exact format shown"""
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+        import os
+        
+        # Email configuration
+        smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+        smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        sender_email = os.getenv("SENDER_EMAIL", "noreply@jobswipe.com")
+        sender_password = os.getenv("SENDER_PASSWORD", "")
+        
+        if not sender_password:
+            logger.warning("⚠️  SMTP password not configured, skipping email")
+            return False
+        
+        # Create message
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = "✓ Application Submitted"
+        msg["From"] = f"Job-Swipe <{sender_email}>"
+        msg["To"] = user_email
+        
+        # HTML email body matching the screenshot format
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                body {{
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    margin: 0;
+                    padding: 0;
+                    background-color: #f5f5f5;
+                }}
+                .email-container {{
+                    max-width: 600px;
+                    margin: 40px auto;
+                    background-color: #ffffff;
+                    border-radius: 8px;
+                    overflow: hidden;
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                }}
+                .header {{
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    padding: 40px 20px;
+                    text-align: center;
+                    color: white;
+                }}
+                .header-icon {{
+                    font-size: 48px;
+                    margin-bottom: 10px;
+                }}
+                .header h1 {{
+                    margin: 0;
+                    font-size: 32px;
+                    font-weight: 600;
+                }}
+                .success-badge {{
+                    background-color: #d4edda;
+                    color: #155724;
+                    padding: 12px 24px;
+                    margin: 20px;
+                    border-radius: 6px;
+                    display: inline-block;
+                    font-weight: 500;
+                }}
+                .content {{
+                    padding: 40px;
+                }}
+                .job-title {{
+                    font-size: 24px;
+                    font-weight: 600;
+                    color: #1a202c;
+                    margin: 0 0 10px 0;
+                }}
+                .company-info {{
+                    color: #718096;
+                    font-size: 16px;
+                    margin-bottom: 30px;
+                }}
+                .message-box {{
+                    background-color: #f7fafc;
+                    border-left: 4px solid #667eea;
+                    padding: 20px;
+                    margin: 30px 0;
+                    border-radius: 4px;
+                }}
+                .message-box p {{
+                    margin: 10px 0;
+                }}
+                .sent-items {{
+                    margin: 20px 0;
+                }}
+                .sent-items h3 {{
+                    font-size: 16px;
+                    font-weight: 600;
+                    margin-bottom: 10px;
+                }}
+                .sent-items ul {{
+                    list-style: none;
+                    padding: 0;
+                }}
+                .sent-items li {{
+                    padding: 8px 0;
+                    padding-left: 24px;
+                    position: relative;
+                }}
+                .sent-items li:before {{
+                    content: "•";
+                    position: absolute;
+                    left: 8px;
+                    color: #667eea;
+                    font-weight: bold;
+                }}
+                .footer-note {{
+                    background-color: #e6f2ff;
+                    padding: 20px;
+                    margin-top: 30px;
+                    border-radius: 6px;
+                    display: flex;
+                    align-items: center;
+                }}
+                .footer-note-icon {{
+                    font-size: 24px;
+                    margin-right: 12px;
+                }}
+                .footer {{
+                    background-color: #f7fafc;
+                    padding: 20px;
+                    text-align: center;
+                    color: #718096;
+                    font-size: 14px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="email-container">
+                <!-- Header -->
+                <div class="header">
+                    <div class="header-icon">✨</div>
+                    <h1>Job-Swipe</h1>
+                </div>
+                
+                <!-- Success Badge -->
+                <div style="text-align: center; margin-top: -10px;">
+                    <div class="success-badge">
+                        ✓ Application Submitted
+                    </div>
+                </div>
+                
+                <!-- Content -->
+                <div class="content">
+                    <!-- Job Details -->
+                    <h2 class="job-title">{job_title}</h2>
+                    <div class="company-info">
+                        <strong>{company_name}</strong> • {job_location}
+                    </div>
+                    
+                    <!-- Message Box -->
+                    <div class="message-box">
+                        <p>Hi {user_name},</p>
+                        <p>Great news! Your application has been successfully submitted through Job-Swipe.</p>
+                        
+                        <div class="sent-items">
+                            <h3>What was sent:</h3>
+                            <ul>
+                                <li>Your Application</li>
+                                <li>Resume</li>
+                            </ul>
+                        </div>
+                        
+                        <p>Good luck! 🍀</p>
+                    </div>
+                    
+                    <!-- Footer Note -->
+                    <div class="footer-note">
+                        <span class="footer-note-icon">📱</span>
+                        <div>
+                            <strong>Track your application</strong> in the Job-Swipe mobile app
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Footer -->
+                <div class="footer">
+                    <p>This is an automated message from Job-Swipe.</p>
+                    <p>© 2025 Job-Swipe. All rights reserved.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        # Attach HTML content
+        html_part = MIMEText(html_content, "html")
+        msg.attach(html_part)
+        
+        # Send email
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+        
+        logger.info(f"✅ Application confirmation email sent to {user_email}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to send application email: {e}")
+        return False
+
+async def send_saved_email(user_email: str, user_name: str, job_title: str, company_name: str):
+    """Send saved job notification email"""
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+        import os
+        
+        smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+        smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        sender_email = os.getenv("SENDER_EMAIL", "noreply@jobswipe.com")
+        sender_password = os.getenv("SENDER_PASSWORD", "")
+        
+        if not sender_password:
+            logger.warning("⚠️  SMTP password not configured, skipping email")
+            return False
+        
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = "💾 Job Saved"
+        msg["From"] = f"Job-Swipe <{sender_email}>"
+        msg["To"] = user_email
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body {{
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    margin: 0;
+                    padding: 0;
+                    background-color: #f5f5f5;
+                }}
+                .email-container {{
+                    max-width: 600px;
+                    margin: 40px auto;
+                    background-color: #ffffff;
+                    border-radius: 8px;
+                    overflow: hidden;
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                }}
+                .header {{
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    padding: 40px 20px;
+                    text-align: center;
+                    color: white;
+                }}
+                .content {{
+                    padding: 40px;
+                }}
+                .job-title {{
+                    font-size: 24px;
+                    font-weight: 600;
+                    margin-bottom: 10px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="email-container">
+                <div class="header">
+                    <h1>💾 Job Saved</h1>
+                </div>
+                <div class="content">
+                    <p>Hi {user_name},</p>
+                    <p>You've saved this job for later:</p>
+                    <h2 class="job-title">{job_title}</h2>
+                    <p><strong>{company_name}</strong></p>
+                    <p>You can view all your saved jobs in the Job-Swipe app.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        html_part = MIMEText(html_content, "html")
+        msg.attach(html_part)
+        
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+        
+        logger.info(f"✅ Saved job notification sent to {user_email}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to send saved job email: {e}")
+        return False
+
+async def send_email_safe(email_func, **kwargs):
+    """Safely send email with error handling - doesn't block main operation"""
+    try:
+        email_service = get_email_service()
+        if email_service is None:
+            return False
+        
+        result = await email_func(**kwargs)
+        return result
+    except Exception:
+        # Completely silent - emails are non-critical
+        return False
+
+async def send_application_email_task(user_email: str, user_name: str, job_title: str, company_name: str, job_location: str):
+    """Background task wrapper to send application confirmation email safely."""
+    try:
+        return await send_email_safe(
+            send_application_email,
+            user_email=user_email,
+            user_name=user_name,
+            job_title=job_title,
+            company_name=company_name,
+            job_location=job_location
+        )
+    except Exception:
+        return False
+
+async def send_saved_email_task(user_email: str, user_name: str, job_title: str, company_name: str):
+    """Background task wrapper to send saved job notification safely."""
+    try:
+        return await send_email_safe(
+            send_saved_email,
+            user_email=user_email,
+            user_name=user_name,
+            job_title=job_title,
+            company_name=company_name
+        )
+    except Exception:
+        return False
+
 @router.post("/swipe")
 async def handle_swipe_action(request: SwipeRequest, background_tasks: BackgroundTasks):
-    """Handle user swipe actions (like, dislike, save) with email notifications"""
+    """Handle user swipe actions (like, dislike, save) with optional email notifications"""
     try:
         import time
         start_time = time.time()
@@ -379,83 +758,177 @@ async def handle_swipe_action(request: SwipeRequest, background_tasks: Backgroun
         if not user:
             logger.warning(f"⚠️  User not found: {request.user_id}")
         
-        if request.action in ["save", "like", "super_like", "dislike"]:
-            action_start = time.time()
-            
-            job_snapshot = None
-            try:
-                if request.job_payload:
-                    job_snapshot = request.job_payload
-                else:
-                    job_snapshot = await db.get_job_by_id(request.job_id)
-            except Exception as e:
-                logger.debug(f"⚠️  Could not get job snapshot: {e}")
-                job_snapshot = None
-            
-            result = await db.save_user_job_action(request.user_id, request.job_id, request.action, job_snapshot)
-            action_elapsed = time.time() - action_start
-            
-            if not result:
-                logger.error(f"❌ Failed to persist action '{request.action}' to MongoDB")
+        # Get job snapshot
+        action_start = time.time()
+        
+        job_snapshot = None
+        try:
+            if request.job_payload:
+                job_snapshot = request.job_payload
+                logger.info(f"📦 Using provided job payload")
             else:
-                logger.info(f"✅ Action saved in {action_elapsed:.3f} seconds")
+                job_snapshot = await db.get_job_by_id(request.job_id)
+                logger.info(f"📦 Fetched job from database")
+        except Exception as e:
+            logger.debug(f"⚠️  Could not get job snapshot: {e}")
+            job_snapshot = {}
+        
+        # Clean job snapshot - remove action-specific timestamps and metadata
+        if job_snapshot:
+            logger.info(f"🧹 Cleaning job snapshot...")
+            logger.info(f"   Original keys: {list(job_snapshot.keys())}")
             
-            # Send email notification for right swipes (like, super_like, apply)
-            if request.action in ['like', 'super_like', 'apply'] and user and job_snapshot:
-                logger.info(f"📧 Triggering email notification for {request.action} action")
+            cleaned_snapshot = {k: v for k, v in job_snapshot.items() 
+                               if k not in ['saved_at', 'liked_at', 'disliked_at', 'created_at', 'updated_at', '_id']}
+            
+            # Ensure job_id is set correctly
+            if 'id' in cleaned_snapshot:
+                job_snapshot = cleaned_snapshot
+            else:
+                logger.warning(f"⚠️  No 'id' field in job snapshot, using job_id from request")
+                job_snapshot = cleaned_snapshot
+                job_snapshot['id'] = request.job_id
                 
-                # Extract user details
-                user_email = user.get('email', '')
-                user_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "User"
+            logger.info(f"   Cleaned keys: {list(job_snapshot.keys())}")
+            logger.info(f"   Job snapshot ready for saving")
+        else:
+            logger.warning(f"⚠️  No job snapshot available, creating minimal payload")
+            job_snapshot = {'id': request.job_id}
+        
+        # Route actions to correct collections with detailed logging
+        result = False
+        collection_name = ""
+        
+        logger.info(f"\n📝 === SAVING TO DATABASE ===")
+        logger.info(f"Action: {request.action}")
+        logger.info(f"User ID: {request.user_id}")
+        logger.info(f"Job ID: {request.job_id}")
+        
+        try:
+            if request.action in ["like", "super_like", "apply"]:
+                collection_name = "users_job_like"
+                logger.info(f"🎯 Routing to {collection_name} collection...")
+                result = await db.save_job_like(request.user_id, request.job_id, job_snapshot)
+                logger.info(f"{'✅ SUCCESS' if result else '❌ FAILED'}: save_job_like returned {result}")
                 
-                # Extract job details
-                job_title = job_snapshot.get('title', 'Job Position')
-                company_name = job_snapshot.get('company', job_snapshot.get('employer_id', 'Company'))
-                job_location = job_snapshot.get('location', 'Location not specified')
+            elif request.action == "save":
+                collection_name = "users_job_saved"
+                logger.info(f"🎯 Routing to {collection_name} collection...")
+                result = await db.save_job_saved(request.user_id, request.job_id, job_snapshot)
+                logger.info(f"{'✅ SUCCESS' if result else '❌ FAILED'}: save_job_saved returned {result}")
                 
-                if user_email:
-                    # Send email in background to not block the response
+            elif request.action == "dislike":
+                collection_name = "users_job_dislike"
+                logger.info(f"🎯 Routing to {collection_name} collection...")
+                result = await db.save_job_dislike(request.user_id, request.job_id)
+                logger.info(f"{'✅ SUCCESS' if result else '❌ FAILED'}: save_job_dislike returned {result}")
+                
+        except Exception as save_error:
+            logger.error(f"💥 EXCEPTION during save to {collection_name}:")
+            logger.error(f"   Error type: {type(save_error).__name__}")
+            logger.error(f"   Error message: {str(save_error)}")
+            import traceback
+            logger.error(f"   Traceback:\n{traceback.format_exc()}")
+            result = False
+        
+        action_elapsed = time.time() - action_start
+        
+        if not result:
+            logger.error(f"❌ FINAL RESULT: Failed to persist action '{request.action}' to {collection_name}")
+            logger.error(f"   This is a critical error - the action was not saved!")
+        else:
+            logger.info(f"✅ FINAL RESULT: Action saved successfully in {action_elapsed:.3f} seconds")
+            
+            # Verify the save by querying the database
+            try:
+                logger.info(f"🔍 Verifying save in database...")
+                if request.action in ["like", "super_like", "apply"]:
+                    verify_doc = await db.users_db.users_job_like.find_one({
+                        "user_id": request.user_id,
+                        "job_id": request.job_id
+                    })
+                elif request.action == "save":
+                    verify_doc = await db.users_db.users_job_saved.find_one({
+                        "user_id": request.user_id,
+                        "job_id": request.job_id
+                    })
+                elif request.action == "dislike":
+                    verify_doc = await db.users_db.users_job_dislike.find_one({
+                        "user_id": request.user_id,
+                        "job_id": request.job_id
+                    })
+                
+                if verify_doc:
+                    logger.info(f"✅ VERIFICATION SUCCESS: Document found in {collection_name}")
+                    logger.info(f"   Document ID: {verify_doc.get('_id')}")
+                else:
+                    logger.error(f"❌ VERIFICATION FAILED: Document NOT found in {collection_name}")
+                    
+            except Exception as verify_error:
+                logger.error(f"⚠️  Verification check failed: {verify_error}")
+        
+        # Queue email notification based on action
+        email_will_be_sent = False
+        
+        if user and job_snapshot and result:
+            user_email = user.get('email', '')
+            user_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "User"
+            job_title = job_snapshot.get('title', 'Job Position')
+            company_name = job_snapshot.get('company', job_snapshot.get('employer_id', 'Company'))
+            
+            # Parse location properly
+            job_location_data = job_snapshot.get('location', {})
+            if isinstance(job_location_data, dict):
+                city = job_location_data.get('city', '')
+                state = job_location_data.get('state', '')
+                country = job_location_data.get('country', 'USA')
+                remote = job_location_data.get('remote', False)
+                
+                location_parts = [p for p in [city, state, country] if p]
+                job_location = ', '.join(location_parts) if location_parts else 'Location not specified'
+                if remote:
+                    job_location = f"Remote, {job_location}"
+            else:
+                job_location = str(job_location_data) if job_location_data else 'Location not specified'
+            
+            if user_email:
+                # Send application confirmation email for like/apply actions
+                if request.action in ['like', 'super_like', 'apply']:
+                    logger.info(f"📧 Queueing application confirmation email for {request.action} action")
                     background_tasks.add_task(
-                        email_service.send_application_confirmation,
-                        recipient_email=user_email,
+                        send_application_email_task,
+                        user_email=user_email,
                         user_name=user_name,
                         job_title=job_title,
                         company_name=company_name,
-                        location=job_location
+                        job_location=job_location
                     )
-                    logger.info(f"✅ Email queued for {user_email}")
-                else:
-                    logger.warning(f"⚠️  No email found for user {request.user_id}")
-            
-            # Send email notification for saved jobs
-            elif request.action == 'save' and user and job_snapshot:
-                logger.info(f"📧 Triggering saved job notification")
+                    email_will_be_sent = True
+                    logger.info(f"✅ Application email queued for {user_email}")
                 
-                user_email = user.get('email', '')
-                user_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "User"
-                job_title = job_snapshot.get('title', 'Job Position')
-                company_name = job_snapshot.get('company', job_snapshot.get('employer_id', 'Company'))
-                
-                if user_email:
+                # Send saved job notification for save action
+                elif request.action == 'save':
+                    logger.info(f"📧 Queueing saved job notification")
                     background_tasks.add_task(
-                        email_service.send_saved_job_notification,
-                        recipient_email=user_email,
+                        send_saved_email_task,
+                        user_email=user_email,
                         user_name=user_name,
                         job_title=job_title,
                         company_name=company_name
                     )
+                    email_will_be_sent = True
                     logger.info(f"✅ Saved job notification queued for {user_email}")
 
         elapsed = time.time() - start_time
-        logger.info(f"⏱️  Total swipe handling: {elapsed:.3f} seconds")
-        logger.info(f"=====================================")
+        logger.info(f"⏱️  Total swipe handling: {elapsed:.3f}s")
+        logger.info(f"=====================================\n")
 
         return {
-            "success": True,
-            "message": f"Job {request.action} successfully",
+            "success": result,  # Return actual result, not always True
+            "message": f"Job {request.action} {'successfully' if result else 'failed'}",
             "action": request.action,
             "job_id": request.job_id,
-            "email_sent": request.action in ['like', 'super_like', 'apply', 'save'],
+            "email_queued": email_will_be_sent,
             "swipe_limit": {
                 "remaining": limit_check.get("remaining", 0),
                 "total_today": limit_check.get("total_today", 0),
@@ -468,6 +941,8 @@ async def handle_swipe_action(request: SwipeRequest, background_tasks: Backgroun
         raise
     except Exception as e:
         logger.error(f"💥 Error handling swipe action: {e}")
+        import traceback
+        logger.error(f"Full traceback:\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Swipe action failed: {str(e)}")
 
 @router.get("/saved/{clerk_id}")
@@ -481,7 +956,6 @@ async def get_saved_jobs(clerk_id: str):
         logger.info(f"User ID: {clerk_id}")
         logger.info(f"Timestamp: {datetime.utcnow().isoformat()}")
         
-        # Use NON-CACHED version for real-time updates
         jobs = await db.get_user_saved_jobs(clerk_id)
         
         elapsed = time.time() - start_time
@@ -519,13 +993,29 @@ async def remove_saved_job(req: RemoveSavedRequest):
 async def get_liked_jobs(clerk_id: str):
     """Return the user's liked jobs from users_job_like collection"""
     try:
-        print(f"\n💚 === FETCHING LIKED JOBS ===")
-        print(f"User ID: {clerk_id}")
+        import time
+        start_time = time.time()
+        
+        logger.info(f"\n💚 === FETCHING LIKED JOBS ===")
+        logger.info(f"User ID: {clerk_id}")
+        logger.info(f"Timestamp: {datetime.utcnow().isoformat()}")
+        
+        # Direct query to verify collection access
+        logger.info(f"🔍 Querying users_job_like collection directly...")
+        count = await db.users_db.users_job_like.count_documents({"user_id": clerk_id})
+        logger.info(f"📊 Found {count} documents in users_job_like for this user")
+        
         jobs = await db.get_user_liked_jobs(clerk_id)
-        print(f"✅ Found {len(jobs)} liked jobs")
+        
+        elapsed = time.time() - start_time
+        logger.info(f"✅ Returned {len(jobs)} liked jobs in {elapsed:.3f} seconds")
+        logger.info(f"=====================================")
+        
         return jobs
     except Exception as e:
-        print(f"💥 Error fetching liked jobs: {e}")
+        logger.error(f"💥 Error fetching liked jobs: {e}")
+        import traceback
+        logger.error(f"Full traceback:\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch liked jobs: {str(e)}")
 
 @router.post("/liked/remove")
