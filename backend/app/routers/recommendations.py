@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from app.core.db import db
 from app.services.recommender import HybridRecommender
 from app.services.embeddings import EmbeddingService
+from app.services.email_service import email_service  # Import email service
 from app.models.user import UserProfile, JobSeekerCreate, EmployerCreate
 from app.models.job import JobPosting, JobRecommendation
 from app.models.swipe import UserSwipe, SwipeType
@@ -340,8 +341,8 @@ async def get_recommendations(
         raise HTTPException(status_code=500, detail=f"Recommendation failed: {str(e)}")
 
 @router.post("/swipe")
-async def handle_swipe_action(request: SwipeRequest):
-    """Handle user swipe actions (like, dislike, save) with daily limit enforcement"""
+async def handle_swipe_action(request: SwipeRequest, background_tasks: BackgroundTasks):
+    """Handle user swipe actions (like, dislike, save) with email notifications"""
     try:
         import time
         start_time = time.time()
@@ -373,6 +374,11 @@ async def handle_swipe_action(request: SwipeRequest):
         
         logger.info(f"✅ Swipe allowed. Remaining: {limit_check.get('remaining', 0)}")
         
+        # Get user details for email
+        user = await db.get_user_by_clerk_id(request.user_id)
+        if not user:
+            logger.warning(f"⚠️  User not found: {request.user_id}")
+        
         if request.action in ["save", "like", "super_like", "dislike"]:
             action_start = time.time()
             
@@ -393,6 +399,52 @@ async def handle_swipe_action(request: SwipeRequest):
                 logger.error(f"❌ Failed to persist action '{request.action}' to MongoDB")
             else:
                 logger.info(f"✅ Action saved in {action_elapsed:.3f} seconds")
+            
+            # Send email notification for right swipes (like, super_like, apply)
+            if request.action in ['like', 'super_like', 'apply'] and user and job_snapshot:
+                logger.info(f"📧 Triggering email notification for {request.action} action")
+                
+                # Extract user details
+                user_email = user.get('email', '')
+                user_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "User"
+                
+                # Extract job details
+                job_title = job_snapshot.get('title', 'Job Position')
+                company_name = job_snapshot.get('company', job_snapshot.get('employer_id', 'Company'))
+                job_location = job_snapshot.get('location', 'Location not specified')
+                
+                if user_email:
+                    # Send email in background to not block the response
+                    background_tasks.add_task(
+                        email_service.send_application_confirmation,
+                        recipient_email=user_email,
+                        user_name=user_name,
+                        job_title=job_title,
+                        company_name=company_name,
+                        location=job_location
+                    )
+                    logger.info(f"✅ Email queued for {user_email}")
+                else:
+                    logger.warning(f"⚠️  No email found for user {request.user_id}")
+            
+            # Send email notification for saved jobs
+            elif request.action == 'save' and user and job_snapshot:
+                logger.info(f"📧 Triggering saved job notification")
+                
+                user_email = user.get('email', '')
+                user_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "User"
+                job_title = job_snapshot.get('title', 'Job Position')
+                company_name = job_snapshot.get('company', job_snapshot.get('employer_id', 'Company'))
+                
+                if user_email:
+                    background_tasks.add_task(
+                        email_service.send_saved_job_notification,
+                        recipient_email=user_email,
+                        user_name=user_name,
+                        job_title=job_title,
+                        company_name=company_name
+                    )
+                    logger.info(f"✅ Saved job notification queued for {user_email}")
 
         elapsed = time.time() - start_time
         logger.info(f"⏱️  Total swipe handling: {elapsed:.3f} seconds")
@@ -403,6 +455,7 @@ async def handle_swipe_action(request: SwipeRequest):
             "message": f"Job {request.action} successfully",
             "action": request.action,
             "job_id": request.job_id,
+            "email_sent": request.action in ['like', 'super_like', 'apply', 'save'],
             "swipe_limit": {
                 "remaining": limit_check.get("remaining", 0),
                 "total_today": limit_check.get("total_today", 0),
