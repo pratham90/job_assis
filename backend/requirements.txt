@@ -1,47 +1,41 @@
-# Core FastAPI dependencies
+# --- Core FastAPI ---
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 
-# Database dependencies
+# --- Database & Cache ---
 pymongo>=4.6.0
 motor>=3.3.0
 redis>=5.0.0
-aioredis>=2.0.0
+# aioredis is merged into redis >=4.2, no need separately
+# aioredis>=2.0.0  ❌ remove this
+
+# --- Email / API clients ---
 sendgrid>=6.11.0
-# HuggingFace + Transformers ecosystem
+requests>=2.31.0
+email-validator>=2.1.0
+
+# --- Machine Learning / NLP ---
 sentence-transformers>=2.2.0
 transformers>=4.35.0
 huggingface-hub>=0.19.0
 torch>=2.1.0
 numpy>=1.24.0
-
-# Machine Learning utilities
 scikit-learn>=1.3.0
 
-# Data validation and serialization
+# --- Data validation ---
 pydantic>=2.5.0
 pydantic[email]>=2.5.0
-email-validator>=2.1.0
 
-
-# Environment and configuration
+# --- Config & Utilities ---
 python-dotenv>=1.0.0
 pyyaml>=6.0.0
 
-# Serverless deployment (Vercel)
+# --- Deployment ---
+gunicorn>=21.2.0
 mangum>=0.17.0
-
-# File upload support
 python-multipart>=0.0.6
 
-# Production server (for traditional deploys)
-gunicorn>=21.2.0
-sendgrid==6.11.0
-requests==2.31.0
-# CORS middleware (included with FastAPI but explicit for clarity)
-# fastapi already includes CORS middleware
-
-# Development dependencies (optional)
+# --- Optional (commented out) ---
 # pytest>=7.4.0
 # pytest-asyncio>=0.21.0
 # black>=23.0.0
