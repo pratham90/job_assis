@@ -1,8 +1,7 @@
 # app/services/email_service.py
 
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail, Email, To, Content
 import os
 import logging
 
@@ -10,30 +9,31 @@ logger = logging.getLogger(__name__)
 
 class EmailService:
     def __init__(self):
-        self.smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-        self.smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        self.sendgrid_api_key = os.getenv("SENDGRID_API_KEY", "")
         self.sender_email = os.getenv("SENDER_EMAIL", "")
-        self.sender_password = os.getenv("SENDER_PASSWORD", "")
         
         # Check if email is configured
-        self.is_configured = bool(self.sender_email and self.sender_password)
+        self.is_configured = bool(self.sendgrid_api_key and self.sender_email)
         
         if not self.is_configured:
-            logger.warning("⚠️  Email service not configured. Set SENDER_EMAIL and SENDER_PASSWORD env variables.")
+            logger.warning("⚠️  SendGrid not configured. Set SENDGRID_API_KEY and SENDER_EMAIL env variables.")
     
     def send_application_confirmation(self, user_email: str, user_name: str, job_title: str, 
                                     company_name: str, job_location: str) -> bool:
-        """Send application confirmation email matching the screenshot format"""
+        """Send application confirmation email using SendGrid API"""
         if not self.is_configured:
-            logger.info("📧 Email not configured, skipping application email")
+            logger.info("📧 SendGrid not configured, skipping application email")
             return False
         
         try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = "✓ Application Submitted - Job-Swipe"
-            msg["From"] = f"Job-Swipe <{self.sender_email}>"
-            msg["To"] = user_email
+            # Create the email message
+            message = Mail(
+                from_email=Email(self.sender_email, "Job-Swipe"),
+                to_emails=To(user_email),
+                subject="✓ Application Submitted - Job-Swipe"
+            )
             
+            # HTML content with unsubscribe
             html_content = f"""
             <!DOCTYPE html>
             <html>
@@ -148,6 +148,19 @@ class EmailService:
                         color: #718096;
                         font-size: 14px;
                     }}
+                    .unsubscribe {{
+                        font-size: 12px;
+                        line-height: 20px;
+                        margin-top: 10px;
+                        text-align: center;
+                    }}
+                    .unsubscribe a {{
+                        color: #667eea;
+                        text-decoration: none;
+                    }}
+                    .unsubscribe a:hover {{
+                        text-decoration: underline;
+                    }}
                 </style>
             </head>
             <body>
@@ -202,21 +215,33 @@ class EmailService:
                     <div class="footer">
                         <p>This is an automated message from Job-Swipe.</p>
                         <p>© 2025 Job-Swipe. All rights reserved.</p>
+                        
+                        <!-- Unsubscribe Section -->
+                        <div class="unsubscribe">
+                            <p>
+                                <a href="<%asm_group_unsubscribe_raw_url%>">Unsubscribe</a> | 
+                                <a href="<%asm_preferences_raw_url%>">Email Preferences</a>
+                            </p>
+                        </div>
                     </div>
                 </div>
             </body>
             </html>
             """
             
-            html_part = MIMEText(html_content, "html")
-            msg.attach(html_part)
+            message.content = Content("text/html", html_content)
             
-            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
-                server.starttls()
-                server.login(self.sender_email, self.sender_password)
-                server.send_message(msg)
+            # Enable click tracking and unsubscribe
+            message.tracking_settings = {
+                "click_tracking": {"enable": True},
+                "open_tracking": {"enable": True}
+            }
             
-            logger.info(f"✅ Application confirmation email sent to {user_email}")
+            # Send via SendGrid API
+            sg = SendGridAPIClient(self.sendgrid_api_key)
+            response = sg.send(message)
+            
+            logger.info(f"✅ Application confirmation email sent to {user_email} (Status: {response.status_code})")
             return True
             
         except Exception as e:
@@ -225,16 +250,17 @@ class EmailService:
     
     def send_saved_job_notification(self, user_email: str, user_name: str, 
                                    job_title: str, company_name: str) -> bool:
-        """Send saved job notification email"""
+        """Send saved job notification email using SendGrid API"""
         if not self.is_configured:
-            logger.info("📧 Email not configured, skipping saved job email")
+            logger.info("📧 SendGrid not configured, skipping saved job email")
             return False
         
         try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = "💾 Job Saved - Job-Swipe"
-            msg["From"] = f"Job-Swipe <{self.sender_email}>"
-            msg["To"] = user_email
+            message = Mail(
+                from_email=Email(self.sender_email, "Job-Swipe"),
+                to_emails=To(user_email),
+                subject="💾 Job Saved - Job-Swipe"
+            )
             
             html_content = f"""
             <!DOCTYPE html>
@@ -279,6 +305,21 @@ class EmailService:
                         margin: 20px 0;
                         border-radius: 4px;
                     }}
+                    .footer {{
+                        background-color: #f7fafc;
+                        padding: 20px;
+                        text-align: center;
+                        color: #718096;
+                        font-size: 14px;
+                    }}
+                    .unsubscribe {{
+                        font-size: 12px;
+                        margin-top: 10px;
+                    }}
+                    .unsubscribe a {{
+                        color: #667eea;
+                        text-decoration: none;
+                    }}
                 </style>
             </head>
             <body>
@@ -295,20 +336,32 @@ class EmailService:
                             <p>You can view all your saved jobs in the Job-Swipe app anytime.</p>
                         </div>
                     </div>
+                    <div class="footer">
+                        <p>© 2025 Job-Swipe. All rights reserved.</p>
+                        <div class="unsubscribe">
+                            <p>
+                                <a href="<%asm_group_unsubscribe_raw_url%>">Unsubscribe</a> | 
+                                <a href="<%asm_preferences_raw_url%>">Email Preferences</a>
+                            </p>
+                        </div>
+                    </div>
                 </div>
             </body>
             </html>
             """
             
-            html_part = MIMEText(html_content, "html")
-            msg.attach(html_part)
+            message.content = Content("text/html", html_content)
             
-            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
-                server.starttls()
-                server.login(self.sender_email, self.sender_password)
-                server.send_message(msg)
+            # Enable tracking
+            message.tracking_settings = {
+                "click_tracking": {"enable": True},
+                "open_tracking": {"enable": True}
+            }
             
-            logger.info(f"✅ Saved job notification sent to {user_email}")
+            sg = SendGridAPIClient(self.sendgrid_api_key)
+            response = sg.send(message)
+            
+            logger.info(f"✅ Saved job notification sent to {user_email} (Status: {response.status_code})")
             return True
             
         except Exception as e:
