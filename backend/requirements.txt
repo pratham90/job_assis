@@ -8,7 +8,6 @@ motor>=3.3.0
 redis>=5.0.0
 # aioredis is merged into redis >=4.2, no need separately
 # aioredis>=2.0.0  ❌ remove this
-concurrent-futures>=3.1.0
 # --- Email / API clients ---
 sendgrid>=6.11.0
 requests>=2.31.0
