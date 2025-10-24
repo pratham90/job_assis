@@ -4,6 +4,7 @@ from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail, Email, To, Content
 import os
 import logging
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,18 @@ class EmailService:
         
         if not self.is_configured:
             logger.warning("⚠️  SendGrid not configured. Set SENDGRID_API_KEY and SENDER_EMAIL env variables.")
+        else:
+            logger.info(f"✅ SendGrid configured with sender: {self.sender_email}")
+    
+    def test_connection(self) -> bool:
+        """Test if we can reach SendGrid API"""
+        try:
+            response = requests.get("https://api.sendgrid.com", timeout=5)
+            logger.info(f"✅ SendGrid API reachable (Status: {response.status_code})")
+            return True
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Cannot reach SendGrid API: {e}")
+            return False
     
     def send_application_confirmation(self, user_email: str, user_name: str, job_title: str, 
                                     company_name: str, job_location: str) -> bool:
@@ -237,7 +250,7 @@ class EmailService:
                 "open_tracking": {"enable": True}
             }
             
-            # Send via SendGrid API
+            # Send via SendGrid API with better error handling
             sg = SendGridAPIClient(self.sendgrid_api_key)
             response = sg.send(message)
             
@@ -245,7 +258,10 @@ class EmailService:
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to send application email: {e}")
+            logger.error(f"❌ Failed to send application email: {type(e).__name__}: {str(e)}")
+            # Log more details for debugging
+            if hasattr(e, 'body'):
+                logger.error(f"Error details: {e.body}")
             return False
     
     def send_saved_job_notification(self, user_email: str, user_name: str, 
@@ -365,7 +381,9 @@ class EmailService:
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to send saved job email: {e}")
+            logger.error(f"❌ Failed to send saved job email: {type(e).__name__}: {str(e)}")
+            if hasattr(e, 'body'):
+                logger.error(f"Error details: {e.body}")
             return False
 
 # Singleton instance
