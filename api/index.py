@@ -17,7 +17,7 @@ sys.path.insert(0, str(backend_dir))
 # Set default MONGO_URI if not provided (for local development)
 if not os.getenv('MONGO_URI'):
     os.environ.setdefault(
-        'MONGO_URI', 'mongodb+srv://Jobs:Jobs-provider@jobs.2m8l8hb.mongodb.net/?retryWrites=true&writeConcern=majority')
+        'MONGO_URI', '')
 
 # Import the FastAPI app from backend
 spec = importlib.util.spec_from_file_location(

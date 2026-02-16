@@ -21,7 +21,7 @@ load_dotenv()
 redis_uri = os.getenv(
     "REDIS_URI", "redis://default:liiSkjZQkhWPULcAcQ2dV0MZzy82wj2B@redis-13364.c56.east-us.azure.redns.redis-cloud.com:13364/0")
 mongo_uri = os.getenv("MONGO_URI", os.getenv(
-    "MONGODB_URI", "mongodb+srv://Jobs:Jobs-provider@jobs.2m8l8hb.mongodb.net/?retryWrites=true&writeConcern=majority"))
+    "MONGODB_URI", ""))
 
 
 class Database:
