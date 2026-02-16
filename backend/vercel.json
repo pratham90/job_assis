@@ -11,5 +11,8 @@
       "src": "/(.*)",
       "dest": "/api/index.py"
     }
-  ]
+  ],
+  "env": {
+    "MONGO_URI": "mongodb+srv://Jobs:Jobs-provider@jobs.2m8l8hb.mongodb.net"
+  }
 }

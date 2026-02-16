@@ -13,11 +13,11 @@ sys.path.insert(0, str(parent_dir))
 
 
 def handler(request, context):
-    # Set environment variables for Vercel
-    os.environ.setdefault('MONGO_URI', os.getenv(
-        'MONGO_URI', 'mongodb+srv://Jobs:Jobs-provider@jobs.2m8l8hb.mongodb.net'))
+    # Ensure MONGO_URI is set from environment
+    if not os.getenv('MONGO_URI'):
+        os.environ['MONGO_URI'] = 'mongodb+srv://Jobs:Jobs-provider@jobs.2m8l8hb.mongodb.net'
 
     # Import and return the FastAPI app
     from mangum import Mangum
-    handler = Mangum(app)
-    return handler(request, context)
+    mangum_handler = Mangum(app)
+    return mangum_handler(request, context)
