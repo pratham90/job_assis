@@ -13,9 +13,9 @@ sys.path.insert(0, str(parent_dir))
 
 
 def handler(request, context):
-    # Ensure MONGO_URI is set from environment
+    # Ensure MONGO_URI is set from environment with fallback
     if not os.getenv('MONGO_URI'):
-        os.environ['MONGO_URI'] = 'mongodb+srv://Jobs:Jobs-provider@jobs.2m8l8hb.mongodb.net'
+        os.environ['MONGO_URI'] = 'mongodb+srv://Jobs:Jobs-provider@jobs.2m8l8hb.mongodb.net/?retryWrites=true&writeConcern=majority'
 
     # Import and return the FastAPI app
     from mangum import Mangum
